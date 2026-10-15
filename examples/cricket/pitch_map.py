@@ -1,13 +1,16 @@
 """
 Build a cricket pitch map from behind-the-bowler video.
 
-1. Calibration - the homography between the image and the pitch comes either from
-   four crease points clicked once with `calibrate`, or from a pitch keypoint model
-   (`--pitch_model`, trained with notebooks/train_pitch_keypoint_detector.ipynb),
-   which calibrates every delivery automatically.
-2. Ball detection - three-frame differencing inside the pitch area needs no model; a
+1. Camera motion - broadcast cameras zoom toward the batter while the ball is in
+   the air. Every frame is mapped into a reference frame of the delivery, where the
+   camera is effectively still, see camera_motion.py.
+2. Calibration - the homography between the reference frame and the pitch comes
+   either from four crease points clicked once with `calibrate`, or from a pitch
+   keypoint model (`--pitch_model`, trained with
+   notebooks/train_pitch_keypoint_detector.ipynb) for every delivery.
+3. Ball detection - three-frame differencing inside the pitch area needs no model; a
    ball detector hosted on Roboflow (`--ball_model`) is more reliable on broadcasts.
-3. `run` links the detections into a trajectory, finds the bounce, projects it onto
+4. `run` links the detections into a trajectory, finds the bounce, projects it onto
    the pitch, and renders the video next to a live pitch map.
 """
 import argparse
@@ -22,6 +25,7 @@ import numpy as np
 import supervision as sv
 from tqdm import tqdm
 
+from camera_motion import frame_to_reference, static_overlay_mask, transform
 from prepare_pitch_dataset import CONFIG_VERTICES
 from sports.common.view import ViewTransformer
 from sports.cricket import (
@@ -64,6 +68,7 @@ CREASE_COLOR = sv.Color.from_hex("#00BFFF")
 
 @dataclass
 class Calibration:
+    """Homographies between the pitch and the reference frame of a delivery."""
     image_to_pitch: ViewTransformer
     pitch_to_image: ViewTransformer
     batting_end: int
@@ -72,6 +77,8 @@ class Calibration:
 @dataclass
 class Delivery:
     frames: List[np.ndarray]
+    # per frame: homography from the frame to the reference frame, None if lost
+    to_reference: List[Optional[np.ndarray]]
     calibration: Calibration
     trajectory: np.ndarray
     bounce: Optional[Bounce]
@@ -154,15 +161,19 @@ def load_calibration(calibration_path: str) -> Calibration:
                                    batting_end=data.get("batting_end", 2))
 
 
-def calibrate_with_model(frames: List[np.ndarray], model, min_confidence: float = 0.5,
-                         samples: int = 8, imgsz: int = 1280) -> Calibration:
+def calibrate_with_model(frames: List[np.ndarray],
+                         to_reference: List[Optional[np.ndarray]], model,
+                         min_confidence: float = 0.5, samples: int = 8,
+                         imgsz: int = 1280) -> Calibration:
     """
-    Calibrate a delivery with the pitch keypoint model. The camera behind the bowler
-    barely moves during a delivery, so the keypoints found in several frames are
+    Calibrate the reference frame of a delivery with the pitch keypoint model. The
+    keypoints found in several frames are mapped into the reference frame and
     combined with a median, which also recovers points hidden by the bowler or the
     umpire in some of the frames.
     """
-    indices = np.unique(np.linspace(0, len(frames) - 1, samples).astype(int))
+    followed = [t for t, h in enumerate(to_reference) if h is not None]
+    picks = np.linspace(0, len(followed) - 1, min(samples, len(followed))).astype(int)
+    indices = np.unique([followed[i] for i in picks])
     found = np.full((len(indices), len(CONFIG_VERTICES), 2), np.nan)
     for row, index in enumerate(indices):
         result = model(frames[index], imgsz=imgsz, verbose=False)[0]
@@ -173,7 +184,7 @@ def calibrate_with_model(frames: List[np.ndarray], model, min_confidence: float 
         confidence = (result.keypoints.conf[best].cpu().numpy()
                       if result.keypoints.conf is not None else np.ones(len(xy)))
         keep = confidence >= min_confidence
-        found[row, keep] = xy[keep]
+        found[row, keep] = transform(to_reference[index], xy[keep])
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN columns
@@ -216,11 +227,11 @@ def pitch_region_mask(
 
 def inside_mask(points: np.ndarray, mask: np.ndarray) -> np.ndarray:
     points = np.asarray(points, dtype=float).reshape(-1, 2)
-    if len(points) == 0:
-        return points
-    x = np.clip(points[:, 0].astype(int), 0, mask.shape[1] - 1)
-    y = np.clip(points[:, 1].astype(int), 0, mask.shape[0] - 1)
-    return points[mask[y, x] > 0]
+    inside = ((points[:, 0] >= 0) & (points[:, 0] < mask.shape[1]) &
+              (points[:, 1] >= 0) & (points[:, 1] < mask.shape[0]))
+    points = points[inside]
+    keep = mask[points[:, 1].astype(int), points[:, 0].astype(int)] > 0
+    return points[keep]
 
 
 class MotionBallDetector:
@@ -241,21 +252,34 @@ class MotionBallDetector:
         return cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (3, 3), 0)
 
     def detect(self, previous: np.ndarray, current: np.ndarray,
-               following: np.ndarray, mask: np.ndarray) -> np.ndarray:
+               following: np.ndarray) -> np.ndarray:
+        """Moving blobs in `current`; the neighbours must be aligned to it already."""
         previous, current, following = map(self._gray, (previous, current, following))
         motion = cv2.min(cv2.absdiff(current, previous), cv2.absdiff(following, current))
         _, binary = cv2.threshold(motion, self.threshold, 255, cv2.THRESH_BINARY)
-        binary = cv2.bitwise_and(binary, mask)
         count, _, stats, centroids = cv2.connectedComponentsWithStats(binary)
         areas = stats[1:count, cv2.CC_STAT_AREA]
         keep = (areas >= self.min_area) & (areas <= self.max_area)
         return centroids[1:count][keep]
 
-    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray) -> List[np.ndarray]:
-        candidates = [np.empty((0, 2))]
-        for previous, current, following in zip(frames, frames[1:], frames[2:]):
-            candidates.append(self.detect(previous, current, following, mask))
-        candidates.append(np.empty((0, 2)))
+    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray,
+                      to_reference: List[Optional[np.ndarray]]) -> List[np.ndarray]:
+        """Candidates per frame, in reference frame pixels inside `mask`."""
+        height, width = frames[0].shape[:2]
+        # Graphics stay put on screen, so they move once the camera is compensated.
+        overlay = static_overlay_mask(frames)
+        candidates = [np.empty((0, 2)) for _ in frames]
+        for t in range(1, len(frames) - 1):
+            if any(to_reference[i] is None for i in (t - 1, t, t + 1)):
+                continue
+            # Warp the neighbours onto frame t to cancel the camera motion.
+            to_current = np.linalg.inv(to_reference[t])
+            neighbours = [cv2.warpPerspective(frames[i], to_current @ to_reference[i],
+                                              (width, height), borderValue=0)
+                          for i in (t - 1, t + 1)]
+            points = inside_mask(self.detect(neighbours[0], frames[t], neighbours[1]),
+                                 overlay)
+            candidates[t] = inside_mask(transform(to_reference[t], points), mask)
         return candidates
 
 
@@ -279,15 +303,25 @@ class RoboflowBallDetector:
         import requests
 
         _, buffer = cv2.imencode(".jpg", frame)
-        response = requests.post(
-            self.url,
-            params={"api_key": self.api_key, "confidence": int(self.confidence * 100)},
-            data=base64.b64encode(buffer).decode("ascii"),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=60,
-        )
-        response.raise_for_status()
-        data = response.json()
+        data = None
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    self.url,
+                    params={"api_key": self.api_key,
+                            "confidence": int(self.confidence * 100)},
+                    data=base64.b64encode(buffer).decode("ascii"),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                data = response.json()
+                break
+            except requests.RequestException as error:
+                print(f"ball detection request failed ({error.__class__.__name__}), "
+                      f"attempt {attempt + 1}/3")
+        if data is None:  # treat the frame as one where the ball was not found
+            return np.empty((0, 2))
         # Predictions are in the coordinates of the image the model saw.
         scale_x = frame.shape[1] / float(data["image"]["width"])
         scale_y = frame.shape[0] / float(data["image"]["height"])
@@ -297,9 +331,17 @@ class RoboflowBallDetector:
             if "ball" in prediction["class"].lower()
         ]).reshape(-1, 2)
 
-    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray) -> List[np.ndarray]:
-        return [inside_mask(self.detect(frame), mask)
-                for frame in tqdm(frames, desc="ball detection", leave=False)]
+    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray,
+                      to_reference: List[Optional[np.ndarray]]) -> List[np.ndarray]:
+        """Candidates per frame, in reference frame pixels inside `mask`."""
+        candidates = []
+        for frame, homography in tqdm(list(zip(frames, to_reference)),
+                                      desc="ball detection", leave=False):
+            if homography is None:
+                candidates.append(np.empty((0, 2)))
+                continue
+            candidates.append(inside_mask(transform(homography, self.detect(frame)), mask))
+        return candidates
 
 
 def link_trajectory(candidates: List[np.ndarray], max_jump: float,
@@ -383,11 +425,12 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
                      pitch_model, ball_detector, manual_fallback: bool) -> Delivery:
     frames = read_frames(source_video_path)
     height, width = frames[0].shape[:2]
+    to_reference = frame_to_reference(frames)
     if calibration is None:
-        calibration = calibrate_with_model(frames, pitch_model)
+        calibration = calibrate_with_model(frames, to_reference, pitch_model)
     mask = pitch_region_mask((height, width), calibration)
 
-    candidates = ball_detector.detect_frames(frames, mask)
+    candidates = ball_detector.detect_frames(frames, mask, to_reference)
     trajectory = link_trajectory(candidates, max_jump=0.08 * width)
     bounce = detect_bounce(trajectory)
     if bounce is None and manual_fallback:
@@ -398,7 +441,8 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
     if bounce is not None:
         bounce_pitch_xy = calibration.image_to_pitch.transform_points(
             bounce.xy[np.newaxis].astype(np.float32))[0]
-    return Delivery(frames, calibration, trajectory, bounce, bounce_pitch_xy)
+    return Delivery(frames, to_reference, calibration, trajectory, bounce,
+                    bounce_pitch_xy)
 
 
 def draw_trail(frame: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
@@ -410,10 +454,12 @@ def draw_trail(frame: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
     return frame
 
 
-def draw_creases(frame: np.ndarray, calibration: Calibration) -> np.ndarray:
-    """Project the crease lines back onto the frame to show the calibration."""
+def draw_creases(frame: np.ndarray, calibration: Calibration,
+                 from_reference: np.ndarray) -> np.ndarray:
+    """Project the crease lines onto the frame to show the calibration."""
     vertices = np.array(CONFIG.vertices, dtype=np.float32)
-    projected = calibration.pitch_to_image.transform_points(vertices).astype(int)
+    projected = transform(from_reference,
+                          calibration.pitch_to_image.transform_points(vertices)).astype(int)
     for start, end in CONFIG.edges:
         cv2.line(frame, tuple(projected[start - 1]), tuple(projected[end - 1]),
                  CREASE_COLOR.as_bgr(), 1, cv2.LINE_AA)
@@ -502,13 +548,20 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
                 description = describe(delivery.bounce_pitch_xy,
                                        delivery.calibration.batting_end, batter_hand)
             for t, frame in enumerate(delivery.frames):
-                frame = cv2.resize(frame, (width, height))
-                frame = draw_creases(frame, delivery.calibration)
-                frame = draw_trail(frame, delivery.trajectory[:t + 1])
                 bounced = delivery.bounce is not None and t >= delivery.bounce.frame_index
-                if bounced:
-                    center = tuple(int(v) for v in delivery.bounce.xy)
-                    cv2.circle(frame, center, 10, BOUNCE_COLOR.as_bgr(), 2, cv2.LINE_AA)
+                if delivery.to_reference[t] is not None:
+                    # Overlays live in reference frame pixels: map them onto frame t.
+                    from_reference = np.linalg.inv(delivery.to_reference[t])
+                    frame = draw_creases(frame.copy(), delivery.calibration, from_reference)
+                    trail = delivery.trajectory[:t + 1].copy()
+                    visible = ~np.isnan(trail).any(axis=1)
+                    trail[visible] = transform(from_reference, trail[visible])
+                    frame = draw_trail(frame, trail)
+                    if bounced:
+                        center = transform(from_reference, delivery.bounce.xy)[0]
+                        cv2.circle(frame, tuple(int(v) for v in center), 10,
+                                   BOUNCE_COLOR.as_bgr(), 2, cv2.LINE_AA)
+                frame = cv2.resize(frame, (width, height))
                 shown_bounces = bounces + ([delivery.bounce_pitch_xy] if bounced else [])
                 shown = descriptions + ([description] if bounced else [])
                 panel = render_panel(shown_bounces, shown, height, batting_end)
