@@ -142,6 +142,7 @@ def calibration_from_points(image_points: np.ndarray, pitch_points: np.ndarray,
     image_points = np.asarray(image_points, dtype=np.float32)
     pitch_points = np.asarray(pitch_points, dtype=np.float32)
     if len(image_points) > 4:
+        cv2.setRNGSeed(0)  # RANSAC samples randomly: keep calibrations repeatable
         _, inliers = cv2.findHomography(image_points, pitch_points, cv2.RANSAC,
                                         ransac_threshold)
         if inliers is not None and inliers.sum() >= 4:
@@ -459,12 +460,11 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         calibration = calibrate_with_model(frames, to_reference, pitch_model)
     mask = pitch_region_mask((height, width), calibration)
 
-    if saved is not None and saved.get("bounce_pitch_xy") is not None:
+    if saved is not None and saved.get("bounce_reference_xy") is not None:
         # Reuse a bounce from an earlier run, e.g. one selected by hand.
         trajectory = np.full((len(frames), 2), np.nan)
-        xy = calibration.pitch_to_image.transform_points(
-            np.array([saved["bounce_pitch_xy"]], dtype=np.float32))[0]
-        bounce = Bounce(frame_index=float(saved["bounce_frame"]), xy=xy.astype(float))
+        bounce = Bounce(frame_index=float(saved["bounce_frame"]),
+                        xy=np.array(saved["bounce_reference_xy"], dtype=float))
     elif manual_bounce:
         trajectory = np.full((len(frames), 2), np.nan)
         bounce = select_bounce_manually(frames, to_reference, calibration, trajectory)
@@ -627,6 +627,8 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
                 "detections": int((~np.isnan(delivery.trajectory).any(axis=1)).sum()),
                 "bounce_frame": None if delivery.bounce is None
                 else delivery.bounce.frame_index,
+                "bounce_reference_xy": None if delivery.bounce is None
+                else delivery.bounce.xy.tolist(),
                 "bounce_pitch_xy": None if delivery.bounce_pitch_xy is None
                 else delivery.bounce_pitch_xy.tolist(),
                 "description": description,
