@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 ANALYSIS_WIDTH = 640
+STILL_THRESHOLD = 2  # median gray-level change between frames of a still camera
 
 
 def static_overlay_mask(frames: List[np.ndarray], std_threshold: float = 3.0,
@@ -40,8 +41,20 @@ def _pair_homography(previous: np.ndarray, current: np.ndarray, mask: np.ndarray
     a = cv2.cvtColor(cv2.resize(previous, size), cv2.COLOR_BGR2GRAY)
     b = cv2.cvtColor(cv2.resize(current, size), cv2.COLOR_BGR2GRAY)
     small_mask = cv2.resize(mask, size, interpolation=cv2.INTER_NEAREST)
+    homography = _track(a, b, small_mask)
+    if homography is None:
+        # Too little texture to track, e.g. a plain field: if the frames barely
+        # differ, the camera is still. The median ignores players and the ball.
+        if np.median(cv2.absdiff(a, b)[small_mask > 0]) < STILL_THRESHOLD:
+            return np.eye(3)
+        return None
+    to_small = np.diag([scale, scale, 1.0])
+    return np.linalg.inv(to_small) @ homography @ to_small
+
+
+def _track(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> Optional[np.ndarray]:
     points = cv2.goodFeaturesToTrack(a, maxCorners=600, qualityLevel=0.01,
-                                     minDistance=8, mask=small_mask)
+                                     minDistance=8, mask=mask)
     if points is None or len(points) < 20:
         return None
     moved, status, _ = cv2.calcOpticalFlowPyrLK(a, b, points, None, winSize=(21, 21),
@@ -52,8 +65,7 @@ def _pair_homography(previous: np.ndarray, current: np.ndarray, mask: np.ndarray
     homography, inliers = cv2.findHomography(points[good], moved[good], cv2.RANSAC, 1.0)
     if homography is None or inliers.sum() < 15:
         return None
-    to_small = np.diag([scale, scale, 1.0])
-    return np.linalg.inv(to_small) @ homography @ to_small
+    return homography
 
 
 def _runs(steps: List[Optional[np.ndarray]]) -> List[Tuple[int, int]]:
