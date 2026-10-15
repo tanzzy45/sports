@@ -16,6 +16,7 @@ Build a cricket pitch map from behind-the-bowler video.
 import argparse
 import base64
 import json
+import os
 import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -449,7 +450,8 @@ def select_bounce_manually(frames: List[np.ndarray],
 
 def process_delivery(source_video_path: str, calibration: Optional[Calibration],
                      pitch_model, ball_detector, manual_fallback: bool,
-                     manual_bounce: bool = False) -> Delivery:
+                     manual_bounce: bool = False,
+                     saved: Optional[dict] = None) -> Delivery:
     frames = read_frames(source_video_path)
     height, width = frames[0].shape[:2]
     to_reference = frame_to_reference(frames)
@@ -457,7 +459,13 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         calibration = calibrate_with_model(frames, to_reference, pitch_model)
     mask = pitch_region_mask((height, width), calibration)
 
-    if manual_bounce:
+    if saved is not None and saved.get("bounce_pitch_xy") is not None:
+        # Reuse a bounce from an earlier run, e.g. one selected by hand.
+        trajectory = np.full((len(frames), 2), np.nan)
+        xy = calibration.pitch_to_image.transform_points(
+            np.array([saved["bounce_pitch_xy"]], dtype=np.float32))[0]
+        bounce = Bounce(frame_index=float(saved["bounce_frame"]), xy=xy.astype(float))
+    elif manual_bounce:
         trajectory = np.full((len(frames), 2), np.nan)
         bounce = select_bounce_manually(frames, to_reference, calibration, trajectory)
     else:
@@ -545,8 +553,12 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         pitch_model_path: Optional[str], ball_model_id: Optional[str],
         ball_confidence: float, target_video_path: str, batter_hand: BatterHand,
         manual_fallback: bool, results_path: Optional[str], display: bool,
-        manual_bounce: bool = False) -> None:
+        manual_bounce: bool = False, bounces_path: Optional[str] = None) -> None:
     calibration = load_calibration(calibration_path) if calibration_path else None
+    saved = {}
+    if bounces_path:
+        with open(bounces_path) as f:
+            saved = {os.path.basename(r["clip"]): r for r in json.load(f)}
     pitch_model = None
     if pitch_model_path:
         from ultralytics import YOLO
@@ -563,7 +575,7 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         try:
             deliveries.append(process_delivery(
                 path, calibration, pitch_model, ball_detector, manual_fallback,
-                manual_bounce))
+                manual_bounce, saved.get(os.path.basename(path))))
             paths.append(path)
         except ValueError as error:
             print(f"skipping {path}: {error}")
@@ -660,6 +672,9 @@ if __name__ == '__main__':
                             help='click the bounce of every delivery instead of '
                                  'detecting the ball')
     run_parser.add_argument('--results_path', type=str, default=None)
+    run_parser.add_argument('--bounces_path', type=str, default=None,
+                            help='results of an earlier run: reuse its bounces, e.g. '
+                                 'to re-render without selecting them again')
     run_parser.add_argument('--display', action='store_true')
 
     args = parser.parse_args()
@@ -681,6 +696,7 @@ if __name__ == '__main__':
             batter_hand=args.batter_hand,
             manual_fallback=args.manual_fallback,
             manual_bounce=args.manual_bounce,
+            bounces_path=args.bounces_path,
             results_path=args.results_path,
             display=args.display
         )
