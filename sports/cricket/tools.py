@@ -39,6 +39,15 @@ DEFAULT_LENGTH_ZONES: List[LengthZone] = [
     LengthZone("short", 1000, 2012),
 ]
 
+# Alternative convention with a narrower full length and a separate bouncer zone.
+BOUNCER_LENGTH_ZONES: List[LengthZone] = [
+    LengthZone("yorker", 0, 200),
+    LengthZone("full", 200, 450),
+    LengthZone("good", 450, 750),
+    LengthZone("short", 750, 1000),
+    LengthZone("bouncer", 1000, 2012),
+]
+
 
 class Line(Enum):
     OUTSIDE_LEG = "outside leg"

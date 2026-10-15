@@ -8,6 +8,7 @@ from sports.cricket.annotators import (
 )
 from sports.cricket.config import CricketPitchConfiguration
 from sports.cricket.tools import (
+    BOUNCER_LENGTH_ZONES,
     DEFAULT_LENGTH_ZONES,
     BatterHand,
     Bounce,
@@ -21,6 +22,7 @@ from sports.cricket.tools import (
 )
 
 __all__ = [
+    "BOUNCER_LENGTH_ZONES",
     "BatterHand",
     "Bounce",
     "CricketPitchConfiguration",

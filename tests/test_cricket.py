@@ -3,6 +3,7 @@ import pytest
 import supervision as sv
 
 from sports.cricket import (
+    BOUNCER_LENGTH_ZONES,
     DEFAULT_LENGTH_ZONES,
     DEFAULT_ZONE_COLORS,
     BatterHand,
@@ -108,6 +109,30 @@ def test_lateral_offset_off_side_convention(batting_end, hand, expected_sign) ->
 ])
 def test_classify_length(distance, expected) -> None:
     assert classify_length(distance).name == expected
+
+
+def test_length_zones_property_matches_default_zones() -> None:
+    assert CONFIG.length_zones == {
+        zone.name: (zone.start, zone.end) for zone in DEFAULT_LENGTH_ZONES
+    }
+
+
+@pytest.mark.parametrize("zones", [DEFAULT_LENGTH_ZONES, BOUNCER_LENGTH_ZONES])
+def test_length_zone_presets_cover_pitch_without_gaps(zones) -> None:
+    assert zones[0].start == 0
+    assert zones[-1].end == CONFIG.pitch_length
+    for previous, current in zip(zones, zones[1:]):
+        assert previous.end == current.start
+
+
+@pytest.mark.parametrize("distance, expected", [
+    (300, "full"),
+    (500, "good"),
+    (800, "short"),
+    (1200, "bouncer"),
+])
+def test_classify_length_with_bouncer_zones(distance, expected) -> None:
+    assert classify_length(distance, BOUNCER_LENGTH_ZONES).name == expected
 
 
 def test_classify_length_outside_zones() -> None:
@@ -217,3 +242,15 @@ def test_draw_pitch_map_colors_bounce_by_length_zone() -> None:
     x, y = _to_pixel(*good_length[0])
     good_index = [zone.name for zone in DEFAULT_LENGTH_ZONES].index("good")
     assert np.array_equal(pitch_map[y, x], DEFAULT_ZONE_COLORS[good_index].as_bgr())
+
+
+def test_draw_pitch_map_with_bouncer_zones() -> None:
+    stumps_x = CONFIG.bowling_crease_x(2)
+    bouncer = np.array([[stumps_x - 1200, CONFIG.middle_stump_y]])
+
+    pitch_map = draw_pitch_map(
+        CONFIG, bouncer, zones=BOUNCER_LENGTH_ZONES, scale=SCALE, padding=PADDING)
+
+    x, y = _to_pixel(*bouncer[0])
+    bouncer_index = [zone.name for zone in BOUNCER_LENGTH_ZONES].index("bouncer")
+    assert np.array_equal(pitch_map[y, x], DEFAULT_ZONE_COLORS[bouncer_index].as_bgr())

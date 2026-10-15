@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 VERTICES_PER_END = 11
 
@@ -108,6 +108,16 @@ class CricketPitchConfiguration:
     @property
     def vertices(self) -> List[Tuple[float, float]]:
         return self._end_vertices(1) + self._end_vertices(2)
+
+    @property
+    def length_zones(self) -> Dict[str, Tuple[float, float]]:
+        """
+        Default length zones as `{name: (start, end)}`, measured from the batter's
+        stumps toward the bowler [cm]. See `sports.cricket.tools.DEFAULT_LENGTH_ZONES`.
+        """
+        from sports.cricket.tools import DEFAULT_LENGTH_ZONES
+
+        return {zone.name: (zone.start, zone.end) for zone in DEFAULT_LENGTH_ZONES}
 
     @staticmethod
     def _validate_end(end: int) -> None:
