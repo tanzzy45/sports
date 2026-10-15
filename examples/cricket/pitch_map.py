@@ -390,15 +390,20 @@ def select_bounce_manually(frames: List[np.ndarray],
                            calibration: Calibration,
                            trajectory: np.ndarray) -> Optional[Bounce]:
     """
-    Step through frames and click where the ball bounced. Returns the bounce in
-    reference frame pixels, so a click on a zoomed frame lands in the right place.
+    Step through frames and click where the ball bounced. When the bounce falls
+    between two frames, click the ball in the last frame before it and the first
+    frame after it: the bounce is placed halfway between the two. Returns the bounce
+    in reference frame pixels, so a click on a zoomed frame lands in the right place.
     """
     index, selected = 0, []
-    window = "bounce: [a]/[d] prev/next frame, click bounce, [enter] ok, [esc] skip"
+    window = ("bounce: [a]/[d] prev/next frame, click the ball (1 or 2 frames), "
+              "[r] reset, [enter] ok, [esc] skip")
 
     def on_click(event: int, x: int, y: int, *_) -> None:
-        if event == cv2.EVENT_LBUTTONDOWN and to_reference[index] is not None:
-            selected[:] = [(index, x, y)]
+        if event != cv2.EVENT_LBUTTONDOWN or to_reference[index] is None:
+            return
+        others = [click for click in selected if click[0] != index]
+        selected[:] = (others if len(others) < 2 else [])[-1:] + [(index, x, y)]
 
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window, on_click)
@@ -411,16 +416,21 @@ def select_bounce_manually(frames: List[np.ndarray],
             visible = ~np.isnan(trail).any(axis=1)
             trail[visible] = transform(from_reference, trail[visible])
             canvas = draw_trail(canvas, trail)
-        if selected:
-            cv2.circle(canvas, selected[0][1:], 8, BOUNCE_COLOR.as_bgr(), 2)
-        cv2.putText(canvas, f"frame {index + 1}/{len(frames)}", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        for frame_index, x, y in selected:
+            if frame_index == index:
+                cv2.circle(canvas, (x, y), 8, BOUNCE_COLOR.as_bgr(), 2)
+        clicked = ", ".join(str(click[0] + 1) for click in sorted(selected))
+        cv2.putText(canvas, f"frame {index + 1}/{len(frames)}   clicked: {clicked or '-'}",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2,
+                    cv2.LINE_AA)
         cv2.imshow(window, canvas)
         key = cv2.waitKey(20) & 0xFF
         if key == ord("a"):
             index = max(0, index - 1)
         elif key == ord("d"):
             index = min(len(frames) - 1, index + 1)
+        elif key == ord("r"):
+            selected.clear()
         elif key == 13 and selected:
             break
         elif key == 27:
@@ -429,9 +439,12 @@ def select_bounce_manually(frames: List[np.ndarray],
     cv2.destroyWindow(window)
     if not selected:
         return None
-    frame_index, x, y = selected[0]
-    xy = transform(to_reference[frame_index], np.array([[x, y]], dtype=np.float32))[0]
-    return Bounce(frame_index=float(frame_index), xy=xy.astype(float))
+    points = np.array([
+        transform(to_reference[frame_index], np.array([[x, y]], dtype=np.float32))[0]
+        for frame_index, x, y in selected
+    ])
+    frame_index = float(np.mean([click[0] for click in selected]))
+    return Bounce(frame_index=frame_index, xy=points.mean(axis=0).astype(float))
 
 
 def process_delivery(source_video_path: str, calibration: Optional[Calibration],
