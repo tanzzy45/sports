@@ -101,15 +101,16 @@ def main(source_video_path: str, pitch_model: str, target_dir: str, limit: int,
     fps = cv2.VideoCapture(source_video_path).get(cv2.CAP_PROP_FPS)
     shots = find_wide_shots(source_video_path, model, stride, imgsz, 0.5, limit * 10)
     os.makedirs(target_dir, exist_ok=True)
-    number = 0
+    number, previous_end = 0, -1
     for first, last in shots:
+        if last <= previous_end:  # another piece of a wide shot already in a clip
+            continue
         if (last - first) / fps < min_wide:
             continue
         # The wide shot is only sampled every `stride` frames: start the zoom check
         # at the last sampled wide frame.
         if not zooms_in(source_video_path, last, fps):
             continue
-        number += 1
         # Keep only the continuous shot around the zoom: cuts break the camera
         # tracking in pitch_map.py.
         start = max(0, last - int(before * fps))
@@ -117,6 +118,10 @@ def main(source_video_path: str, pitch_model: str, target_dir: str, limit: int,
         followed = [t for t, h in enumerate(frame_to_reference(window, anchor=last - start))
                     if h is not None]
         start, end = start + followed[0], start + followed[-1]
+        if start <= previous_end:
+            continue
+        number += 1
+        previous_end = end
         path = os.path.join(target_dir, f"delivery_{number:02d}.mp4")
         write_clip(source_video_path, path, start, end)
         print(f"{path}: {start / fps:7.1f}s - {end / fps:7.1f}s")
