@@ -72,6 +72,36 @@ On the default 6 synthetic deliveries at 25 fps, every bounce is found, within 3
 across the pitch and 23-39 cm along it, about a quarter of the distance the ball
 travels between frames. Higher frame rates reduce this error.
 
+## 🤖 models
+
+The manual calibration and the frame-differencing ball detector are the model-free
+baseline. Public Roboflow Universe datasets can replace both.
+
+- **Pitch keypoints** - `prepare_pitch_dataset.py` merges three datasets that label
+  the same real-world points with different names into one 14-point dataset: the 4
+  corners (bowling crease x return crease), the 4 popping crease points and the base of
+  the 3 stumps at each end. A homography fitted with these points gives a median
+  reprojection error of 0.3-0.6% of the pitch height on every source, which checks the
+  mapping. Train a YOLOv8 pose model on it with
+  [train_pitch_keypoint_detector.ipynb](notebooks/train_pitch_keypoint_detector.ipynb).
+  The model is not trained or connected to `pitch_map.py` yet.
+- **Ball** - [cricket-balls](https://universe.roboflow.com/cricket-rfyd8/cricket-balls-l1us5)
+  has 3,723 broadcast frames where the ball is about 12 px wide in a 1,280 px frame. Its
+  hosted model found 46 of 74 balls (62%) on 100 test images, with 10 false detections
+  (82% precision) and a median centre error of 1.1 px. The test images come from the
+  same broadcasts as the training images, so expect lower numbers on other footage. It
+  is not connected to `pitch_map.py` yet.
+
+| dataset | author | license |
+|:--------|:-------|:--------|
+| [cricket-pitch-keypoints](https://universe.roboflow.com/nishith-n6waq/cricket-pitch-keypoints) | nishith-n6waq | CC BY 4.0 |
+| [cricket-pitch-detection](https://universe.roboflow.com/maree/cricket-pitch-detection-wdtth) | maree | CC BY 4.0 |
+| [cricket-pitch-keypoint](https://universe.roboflow.com/adrian-charan/cricket-pitch-keypoint-kbktj) | adrian-charan | CC BY 4.0 |
+| [cricket-balls](https://universe.roboflow.com/cricket-rfyd8/cricket-balls-l1us5) | cricket-rfyd8 | CC BY 4.0 |
+
+The datasets are broadcast frames. They are downloaded with your own API key and are not
+stored in this repository.
+
 ## ⚠️ limitations
 
 - Synthetic clips have a static background and a clean ball. Real footage adds
@@ -85,7 +115,10 @@ travels between frames. Higher frame rates reduce this error.
 
 ## 🗺️ roadmap
 
-- [ ] Pitch keypoint detector to replace manual calibration.
-- [ ] Trained ball detector for real broadcast footage.
+- [x] Dataset and training notebook for the pitch keypoint detector.
+- [ ] Train the pitch keypoint detector and use it instead of manual calibration.
+- [ ] Use the trained ball detector for real broadcast footage.
 - [ ] Beehive view: where the ball passed the stumps, using the vertical plane of
-  the batter's stumps.
+  the batter's stumps. It needs stump tops, which the datasets above do not have; the
+  [stumps](https://universe.roboflow.com/sarahs-workspace-7m1bb/stumps-q76nc) and
+  [wicket](https://universe.roboflow.com/ibo-6phpm/wicket) keypoint datasets do.
