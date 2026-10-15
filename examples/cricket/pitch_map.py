@@ -386,19 +386,31 @@ def link_trajectory(candidates: List[np.ndarray], max_jump: float,
 
 
 def select_bounce_manually(frames: List[np.ndarray],
+                           to_reference: List[Optional[np.ndarray]],
+                           calibration: Calibration,
                            trajectory: np.ndarray) -> Optional[Bounce]:
-    """Step through frames and click where the ball bounced."""
+    """
+    Step through frames and click where the ball bounced. Returns the bounce in
+    reference frame pixels, so a click on a zoomed frame lands in the right place.
+    """
     index, selected = 0, []
     window = "bounce: [a]/[d] prev/next frame, click bounce, [enter] ok, [esc] skip"
 
     def on_click(event: int, x: int, y: int, *_) -> None:
-        if event == cv2.EVENT_LBUTTONDOWN:
+        if event == cv2.EVENT_LBUTTONDOWN and to_reference[index] is not None:
             selected[:] = [(index, x, y)]
 
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(window, on_click)
     while True:
-        canvas = draw_trail(frames[index].copy(), trajectory[:index + 1])
+        canvas = frames[index].copy()
+        if to_reference[index] is not None:
+            from_reference = np.linalg.inv(to_reference[index])
+            canvas = draw_creases(canvas, calibration, from_reference)
+            trail = trajectory[:index + 1].copy()
+            visible = ~np.isnan(trail).any(axis=1)
+            trail[visible] = transform(from_reference, trail[visible])
+            canvas = draw_trail(canvas, trail)
         if selected:
             cv2.circle(canvas, selected[0][1:], 8, BOUNCE_COLOR.as_bgr(), 2)
         cv2.putText(canvas, f"frame {index + 1}/{len(frames)}", (20, 40),
@@ -418,11 +430,13 @@ def select_bounce_manually(frames: List[np.ndarray],
     if not selected:
         return None
     frame_index, x, y = selected[0]
-    return Bounce(frame_index=float(frame_index), xy=np.array([x, y], dtype=float))
+    xy = transform(to_reference[frame_index], np.array([[x, y]], dtype=np.float32))[0]
+    return Bounce(frame_index=float(frame_index), xy=xy.astype(float))
 
 
 def process_delivery(source_video_path: str, calibration: Optional[Calibration],
-                     pitch_model, ball_detector, manual_fallback: bool) -> Delivery:
+                     pitch_model, ball_detector, manual_fallback: bool,
+                     manual_bounce: bool = False) -> Delivery:
     frames = read_frames(source_video_path)
     height, width = frames[0].shape[:2]
     to_reference = frame_to_reference(frames)
@@ -430,12 +444,17 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         calibration = calibrate_with_model(frames, to_reference, pitch_model)
     mask = pitch_region_mask((height, width), calibration)
 
-    candidates = ball_detector.detect_frames(frames, mask, to_reference)
-    trajectory = link_trajectory(candidates, max_jump=0.08 * width)
-    bounce = detect_bounce(trajectory)
-    if bounce is None and manual_fallback:
-        print(f"no bounce found in {source_video_path}, select it manually")
-        bounce = select_bounce_manually(frames, trajectory)
+    if manual_bounce:
+        trajectory = np.full((len(frames), 2), np.nan)
+        bounce = select_bounce_manually(frames, to_reference, calibration, trajectory)
+    else:
+        candidates = ball_detector.detect_frames(frames, mask, to_reference)
+        trajectory = link_trajectory(candidates, max_jump=0.08 * width)
+        bounce = detect_bounce(trajectory)
+        if bounce is None and manual_fallback:
+            print(f"no bounce found in {source_video_path}, select it manually")
+            bounce = select_bounce_manually(frames, to_reference, calibration,
+                                            trajectory)
 
     bounce_pitch_xy = None
     if bounce is not None:
@@ -512,7 +531,8 @@ def render_panel(bounces: List[np.ndarray], descriptions: List[str], height: int
 def run(source_video_paths: List[str], calibration_path: Optional[str],
         pitch_model_path: Optional[str], ball_model_id: Optional[str],
         ball_confidence: float, target_video_path: str, batter_hand: BatterHand,
-        manual_fallback: bool, results_path: Optional[str], display: bool) -> None:
+        manual_fallback: bool, results_path: Optional[str], display: bool,
+        manual_bounce: bool = False) -> None:
     calibration = load_calibration(calibration_path) if calibration_path else None
     pitch_model = None
     if pitch_model_path:
@@ -529,7 +549,8 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
     for path in tqdm(source_video_paths, desc="processing deliveries"):
         try:
             deliveries.append(process_delivery(
-                path, calibration, pitch_model, ball_detector, manual_fallback))
+                path, calibration, pitch_model, ball_detector, manual_fallback,
+                manual_bounce))
             paths.append(path)
         except ValueError as error:
             print(f"skipping {path}: {error}")
@@ -620,7 +641,11 @@ if __name__ == '__main__':
     run_parser.add_argument('--ball_confidence', type=float, default=0.3)
     run_parser.add_argument('--target_video_path', type=str, required=True)
     run_parser.add_argument('--batter_hand', type=BatterHand, default=BatterHand.RIGHT)
-    run_parser.add_argument('--manual_fallback', action='store_true')
+    run_parser.add_argument('--manual_fallback', action='store_true',
+                            help='click the bounce when it is not found automatically')
+    run_parser.add_argument('--manual_bounce', action='store_true',
+                            help='click the bounce of every delivery instead of '
+                                 'detecting the ball')
     run_parser.add_argument('--results_path', type=str, default=None)
     run_parser.add_argument('--display', action='store_true')
 
@@ -642,6 +667,7 @@ if __name__ == '__main__':
             target_video_path=args.target_video_path,
             batter_hand=args.batter_hand,
             manual_fallback=args.manual_fallback,
+            manual_bounce=args.manual_bounce,
             results_path=args.results_path,
             display=args.display
         )

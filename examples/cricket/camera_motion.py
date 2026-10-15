@@ -56,30 +56,34 @@ def _pair_homography(previous: np.ndarray, current: np.ndarray, mask: np.ndarray
     return np.linalg.inv(to_small) @ homography @ to_small
 
 
-def _longest_run(steps: List[Optional[np.ndarray]]) -> Tuple[int, int]:
-    """First and last frame of the longest stretch the camera can be followed over."""
-    best, start = (0, 0), 0
+def _runs(steps: List[Optional[np.ndarray]]) -> List[Tuple[int, int]]:
+    """First and last frame of every stretch the camera can be followed over."""
+    runs, start = [], 0
     for t, step in enumerate(steps + [None]):
         if step is None:
-            if t - start > best[1] - best[0]:
-                best = (start, t)
+            runs.append((start, t))
             start = t + 1
-    return best
+    return runs
 
 
-def frame_to_reference(frames: List[np.ndarray],
-                       mask: Optional[np.ndarray] = None) -> List[Optional[np.ndarray]]:
+def frame_to_reference(frames: List[np.ndarray], mask: Optional[np.ndarray] = None,
+                       anchor: Optional[int] = None) -> List[Optional[np.ndarray]]:
     """
     Homographies mapping each frame's pixels into a reference frame's pixels. The
-    reference is the first frame of the longest stretch the camera can be followed
-    over; frames outside that stretch, e.g. across a cut, are `None`.
+    reference is the first frame of the stretch the camera can be followed over that
+    contains frame `anchor`, or of the longest stretch without an anchor; frames
+    outside that stretch, e.g. across a cut, are `None`.
     """
     if mask is None:
         mask = static_overlay_mask(frames)
     scale = ANALYSIS_WIDTH / frames[0].shape[1]
     steps = [_pair_homography(previous, current, mask, scale)
              for previous, current in zip(frames, frames[1:])]  # frame t -> t + 1
-    first, last = _longest_run(steps)
+    runs = _runs(steps)
+    if anchor is None:
+        first, last = max(runs, key=lambda run: run[1] - run[0])
+    else:
+        first, last = next(run for run in runs if run[0] <= anchor <= run[1])
 
     result: List[Optional[np.ndarray]] = [None] * len(frames)
     result[first] = np.eye(3)
