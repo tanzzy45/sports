@@ -1,15 +1,19 @@
 """
-Build a cricket pitch map from behind-the-bowler video, without trained models.
+Build a cricket pitch map from behind-the-bowler video.
 
-1. `calibrate` - click four crease points once to compute the homography between
-   the image and the pitch. The camera barely moves during a delivery, so one
-   calibration per camera position is enough.
-2. `run` - find the ball by three-frame differencing inside the pitch area, link the
-   detections into a trajectory, find the bounce, project it onto the pitch, and
-   render the video next to a live pitch map.
+1. Calibration - the homography between the image and the pitch comes either from
+   four crease points clicked once with `calibrate`, or from a pitch keypoint model
+   (`--pitch_model`, trained with notebooks/train_pitch_keypoint_detector.ipynb),
+   which calibrates every delivery automatically.
+2. Ball detection - three-frame differencing inside the pitch area needs no model; a
+   ball detector hosted on Roboflow (`--ball_model`) is more reliable on broadcasts.
+3. `run` links the detections into a trajectory, finds the bounce, projects it onto
+   the pitch, and renders the video next to a live pitch map.
 """
 import argparse
+import base64
 import json
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -18,6 +22,7 @@ import numpy as np
 import supervision as sv
 from tqdm import tqdm
 
+from prepare_pitch_dataset import CONFIG_VERTICES
 from sports.common.view import ViewTransformer
 from sports.cricket import (
     DEFAULT_LENGTH_ZONES,
@@ -45,6 +50,10 @@ CALIBRATION_PROMPTS = [
     "FAR end (batter): popping crease x RIGHT return crease",
 ]
 
+# Keypoints of the pitch model at each end, see prepare_pitch_dataset.py.
+FAR_KEYPOINTS = [0, 1, 4, 5, 8, 9, 10]
+NEAR_KEYPOINTS = [2, 3, 6, 7, 11, 12, 13]
+
 PITCH_MAP_VISIBLE_LENGTH = 1500  # [cm] in front of the batter's stumps
 PITCH_MAP_PADDING = 30
 PANEL_TEXT_WIDTH = 340
@@ -63,6 +72,7 @@ class Calibration:
 @dataclass
 class Delivery:
     frames: List[np.ndarray]
+    calibration: Calibration
     trajectory: np.ndarray
     bounce: Optional[Bounce]
     bounce_pitch_xy: Optional[np.ndarray]
@@ -114,18 +124,69 @@ def calibrate(source_video_path: str, calibration_path: str, frame_index: int,
     print(f"saved calibration to {calibration_path}")
 
 
-def load_calibration(calibration_path: str) -> Calibration:
-    with open(calibration_path) as f:
-        data = json.load(f)
-    image_points = np.array(data["image_points"], dtype=np.float32)
-    pitch_points = np.array(
-        [CONFIG.vertices[CONFIG.labels.index(label)] for label in data["labels"]],
-        dtype=np.float32)
+def calibration_from_points(image_points: np.ndarray, pitch_points: np.ndarray,
+                            batting_end: int = 2,
+                            ransac_threshold: float = 30.0) -> Calibration:
+    """
+    Homographies between the image and the pitch from matching points. With more than
+    four points, outliers more than `ransac_threshold` [cm] off are dropped first.
+    """
+    image_points = np.asarray(image_points, dtype=np.float32)
+    pitch_points = np.asarray(pitch_points, dtype=np.float32)
+    if len(image_points) > 4:
+        _, inliers = cv2.findHomography(image_points, pitch_points, cv2.RANSAC,
+                                        ransac_threshold)
+        if inliers is not None and inliers.sum() >= 4:
+            keep = inliers.ravel().astype(bool)
+            image_points, pitch_points = image_points[keep], pitch_points[keep]
     return Calibration(
         image_to_pitch=ViewTransformer(source=image_points, target=pitch_points),
         pitch_to_image=ViewTransformer(source=pitch_points, target=image_points),
-        batting_end=data.get("batting_end", 2),
+        batting_end=batting_end,
     )
+
+
+def load_calibration(calibration_path: str) -> Calibration:
+    with open(calibration_path) as f:
+        data = json.load(f)
+    pitch_points = [CONFIG.vertices[CONFIG.labels.index(label)] for label in data["labels"]]
+    return calibration_from_points(data["image_points"], pitch_points,
+                                   batting_end=data.get("batting_end", 2))
+
+
+def calibrate_with_model(frames: List[np.ndarray], model, min_confidence: float = 0.5,
+                         samples: int = 8, imgsz: int = 1280) -> Calibration:
+    """
+    Calibrate a delivery with the pitch keypoint model. The camera behind the bowler
+    barely moves during a delivery, so the keypoints found in several frames are
+    combined with a median, which also recovers points hidden by the bowler or the
+    umpire in some of the frames.
+    """
+    indices = np.unique(np.linspace(0, len(frames) - 1, samples).astype(int))
+    found = np.full((len(indices), len(CONFIG_VERTICES), 2), np.nan)
+    for row, index in enumerate(indices):
+        result = model(frames[index], imgsz=imgsz, verbose=False)[0]
+        if len(result.boxes) == 0 or result.keypoints is None:
+            continue
+        best = int(result.boxes.conf.argmax())
+        xy = result.keypoints.xy[best].cpu().numpy()
+        confidence = (result.keypoints.conf[best].cpu().numpy()
+                      if result.keypoints.conf is not None else np.ones(len(xy)))
+        keep = confidence >= min_confidence
+        found[row, keep] = xy[keep]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN columns
+        image_points = np.nanmedian(found, axis=0)
+    visible = ~np.isnan(image_points).any(axis=1)
+    far, near = visible[FAR_KEYPOINTS].sum(), visible[NEAR_KEYPOINTS].sum()
+    if far < 2 or near < 2:
+        raise ValueError(
+            f"the pitch model found {far} keypoints at the far end and {near} at the "
+            "near end; at least 2 at each end are needed. Calibrate this camera "
+            "manually with `calibrate` and pass --calibration_path instead.")
+    pitch_points = np.array([CONFIG.vertices[v - 1] for v in CONFIG_VERTICES])
+    return calibration_from_points(image_points[visible], pitch_points[visible])
 
 
 def pitch_region_mask(
@@ -153,6 +214,15 @@ def pitch_region_mask(
     return cv2.dilate(mask, kernel)
 
 
+def inside_mask(points: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    points = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(points) == 0:
+        return points
+    x = np.clip(points[:, 0].astype(int), 0, mask.shape[1] - 1)
+    y = np.clip(points[:, 1].astype(int), 0, mask.shape[0] - 1)
+    return points[mask[y, x] > 0]
+
+
 class MotionBallDetector:
     """
     Finds small moving blobs with three-frame differencing: a pixel counts as moving
@@ -160,9 +230,8 @@ class MotionBallDetector:
     ball's current position and drops where it was or will be.
     """
 
-    def __init__(self, mask: np.ndarray, threshold: int = 25, min_area: int = 3,
+    def __init__(self, threshold: int = 25, min_area: int = 3,
                  max_area: int = 400) -> None:
-        self.mask = mask
         self.threshold = threshold
         self.min_area = min_area
         self.max_area = max_area
@@ -172,15 +241,65 @@ class MotionBallDetector:
         return cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (3, 3), 0)
 
     def detect(self, previous: np.ndarray, current: np.ndarray,
-               following: np.ndarray) -> np.ndarray:
+               following: np.ndarray, mask: np.ndarray) -> np.ndarray:
         previous, current, following = map(self._gray, (previous, current, following))
         motion = cv2.min(cv2.absdiff(current, previous), cv2.absdiff(following, current))
         _, binary = cv2.threshold(motion, self.threshold, 255, cv2.THRESH_BINARY)
-        binary = cv2.bitwise_and(binary, self.mask)
+        binary = cv2.bitwise_and(binary, mask)
         count, _, stats, centroids = cv2.connectedComponentsWithStats(binary)
         areas = stats[1:count, cv2.CC_STAT_AREA]
         keep = (areas >= self.min_area) & (areas <= self.max_area)
         return centroids[1:count][keep]
+
+    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray) -> List[np.ndarray]:
+        candidates = [np.empty((0, 2))]
+        for previous, current, following in zip(frames, frames[1:], frames[2:]):
+            candidates.append(self.detect(previous, current, following, mask))
+        candidates.append(np.empty((0, 2)))
+        return candidates
+
+
+class RoboflowBallDetector:
+    """
+    Ball detection with a model hosted on Roboflow, e.g. `cricket-balls-l1us5/3`.
+    Uses `ROBOFLOW_API_KEY`, or the key saved by `roboflow login`.
+    """
+
+    def __init__(self, model_id: str, confidence: float = 0.3) -> None:
+        from roboflow.config import load_roboflow_api_key
+
+        self.api_key = load_roboflow_api_key()
+        if not self.api_key:
+            raise ValueError("no Roboflow API key: set ROBOFLOW_API_KEY or run "
+                             "`roboflow login`.")
+        self.url = f"https://detect.roboflow.com/{model_id}"
+        self.confidence = confidence
+
+    def detect(self, frame: np.ndarray) -> np.ndarray:
+        import requests
+
+        _, buffer = cv2.imencode(".jpg", frame)
+        response = requests.post(
+            self.url,
+            params={"api_key": self.api_key, "confidence": int(self.confidence * 100)},
+            data=base64.b64encode(buffer).decode("ascii"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        # Predictions are in the coordinates of the image the model saw.
+        scale_x = frame.shape[1] / float(data["image"]["width"])
+        scale_y = frame.shape[0] / float(data["image"]["height"])
+        return np.array([
+            [prediction["x"] * scale_x, prediction["y"] * scale_y]
+            for prediction in data["predictions"]
+            if "ball" in prediction["class"].lower()
+        ]).reshape(-1, 2)
+
+    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray) -> List[np.ndarray]:
+        return [inside_mask(self.detect(frame), mask)
+                for frame in tqdm(frames, desc="ball detection", leave=False)]
 
 
 def link_trajectory(candidates: List[np.ndarray], max_jump: float,
@@ -260,18 +379,15 @@ def select_bounce_manually(frames: List[np.ndarray],
     return Bounce(frame_index=float(frame_index), xy=np.array([x, y], dtype=float))
 
 
-def process_delivery(source_video_path: str, calibration: Calibration,
-                     manual_fallback: bool) -> Delivery:
+def process_delivery(source_video_path: str, calibration: Optional[Calibration],
+                     pitch_model, ball_detector, manual_fallback: bool) -> Delivery:
     frames = read_frames(source_video_path)
     height, width = frames[0].shape[:2]
-    detector = MotionBallDetector(
-        mask=pitch_region_mask((height, width), calibration))
+    if calibration is None:
+        calibration = calibrate_with_model(frames, pitch_model)
+    mask = pitch_region_mask((height, width), calibration)
 
-    candidates = [np.empty((0, 2))]
-    for previous, current, following in zip(frames, frames[1:], frames[2:]):
-        candidates.append(detector.detect(previous, current, following))
-    candidates.append(np.empty((0, 2)))
-
+    candidates = ball_detector.detect_frames(frames, mask)
     trajectory = link_trajectory(candidates, max_jump=0.08 * width)
     bounce = detect_bounce(trajectory)
     if bounce is None and manual_fallback:
@@ -282,7 +398,7 @@ def process_delivery(source_video_path: str, calibration: Calibration,
     if bounce is not None:
         bounce_pitch_xy = calibration.image_to_pitch.transform_points(
             bounce.xy[np.newaxis].astype(np.float32))[0]
-    return Delivery(frames, trajectory, bounce, bounce_pitch_xy)
+    return Delivery(frames, calibration, trajectory, bounce, bounce_pitch_xy)
 
 
 def draw_trail(frame: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
@@ -347,30 +463,47 @@ def render_panel(bounces: List[np.ndarray], descriptions: List[str], height: int
     return panel
 
 
-def run(source_video_paths: List[str], calibration_path: str, target_video_path: str,
-        batter_hand: BatterHand, manual_fallback: bool, results_path: Optional[str],
-        display: bool) -> None:
-    calibration = load_calibration(calibration_path)
+def run(source_video_paths: List[str], calibration_path: Optional[str],
+        pitch_model_path: Optional[str], ball_model_id: Optional[str],
+        ball_confidence: float, target_video_path: str, batter_hand: BatterHand,
+        manual_fallback: bool, results_path: Optional[str], display: bool) -> None:
+    calibration = load_calibration(calibration_path) if calibration_path else None
+    pitch_model = None
+    if pitch_model_path:
+        from ultralytics import YOLO
+
+        pitch_model = YOLO(pitch_model_path)
+    ball_detector = (RoboflowBallDetector(ball_model_id, ball_confidence)
+                     if ball_model_id else MotionBallDetector())
+
     video_info = sv.VideoInfo.from_video_path(source_video_paths[0])
     width, height = video_info.width, video_info.height
 
-    deliveries = []
+    deliveries, paths = [], []
     for path in tqdm(source_video_paths, desc="processing deliveries"):
-        deliveries.append(process_delivery(path, calibration, manual_fallback))
+        try:
+            deliveries.append(process_delivery(
+                path, calibration, pitch_model, ball_detector, manual_fallback))
+            paths.append(path)
+        except ValueError as error:
+            print(f"skipping {path}: {error}")
+    if not deliveries:
+        raise SystemExit("no delivery could be processed.")
 
-    panel_width = render_panel([], [], height, calibration.batting_end).shape[1]
+    batting_end = deliveries[0].calibration.batting_end
+    panel_width = render_panel([], [], height, batting_end).shape[1]
     output_info = sv.VideoInfo(width=width + panel_width, height=height,
                                fps=video_info.fps)
     bounces, descriptions, results = [], [], []
     with sv.VideoSink(target_video_path, output_info) as sink:
-        for path, delivery in zip(source_video_paths, deliveries):
+        for path, delivery in zip(paths, deliveries):
             description = None
             if delivery.bounce_pitch_xy is not None:
                 description = describe(delivery.bounce_pitch_xy,
-                                       calibration.batting_end, batter_hand)
+                                       delivery.calibration.batting_end, batter_hand)
             for t, frame in enumerate(delivery.frames):
                 frame = cv2.resize(frame, (width, height))
-                frame = draw_creases(frame, calibration)
+                frame = draw_creases(frame, delivery.calibration)
                 frame = draw_trail(frame, delivery.trajectory[:t + 1])
                 bounced = delivery.bounce is not None and t >= delivery.bounce.frame_index
                 if bounced:
@@ -378,8 +511,7 @@ def run(source_video_paths: List[str], calibration_path: str, target_video_path:
                     cv2.circle(frame, center, 10, BOUNCE_COLOR.as_bgr(), 2, cv2.LINE_AA)
                 shown_bounces = bounces + ([delivery.bounce_pitch_xy] if bounced else [])
                 shown = descriptions + ([description] if bounced else [])
-                panel = render_panel(shown_bounces, shown, height,
-                                     calibration.batting_end)
+                panel = render_panel(shown_bounces, shown, height, batting_end)
                 output = np.hstack([frame, panel])
                 sink.write_frame(output)
                 if display:
@@ -393,6 +525,7 @@ def run(source_video_paths: List[str], calibration_path: str, target_video_path:
                 descriptions.append(description)
             results.append({
                 "clip": path,
+                "detections": int((~np.isnan(delivery.trajectory).any(axis=1)).sum()),
                 "bounce_frame": None if delivery.bounce is None
                 else delivery.bounce.frame_index,
                 "bounce_pitch_xy": None if delivery.bounce_pitch_xy is None
@@ -422,7 +555,16 @@ if __name__ == '__main__':
 
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument('--source_video_paths', type=str, nargs='+', required=True)
-    run_parser.add_argument('--calibration_path', type=str, required=True)
+    calibration_group = run_parser.add_mutually_exclusive_group(required=True)
+    calibration_group.add_argument('--calibration_path', type=str,
+                                   help='calibration saved by `calibrate`')
+    calibration_group.add_argument('--pitch_model', type=str,
+                                   help='pitch keypoint model (best.pt) that calibrates '
+                                        'every delivery automatically')
+    run_parser.add_argument('--ball_model', type=str, default=None,
+                            help='Roboflow model id, e.g. cricket-balls-l1us5/3; '
+                                 'frame differencing is used when omitted')
+    run_parser.add_argument('--ball_confidence', type=float, default=0.3)
     run_parser.add_argument('--target_video_path', type=str, required=True)
     run_parser.add_argument('--batter_hand', type=BatterHand, default=BatterHand.RIGHT)
     run_parser.add_argument('--manual_fallback', action='store_true')
@@ -441,6 +583,9 @@ if __name__ == '__main__':
         run(
             source_video_paths=args.source_video_paths,
             calibration_path=args.calibration_path,
+            pitch_model_path=args.pitch_model,
+            ball_model_id=args.ball_model,
+            ball_confidence=args.ball_confidence,
             target_video_path=args.target_video_path,
             batter_hand=args.batter_hand,
             manual_fallback=args.manual_fallback,

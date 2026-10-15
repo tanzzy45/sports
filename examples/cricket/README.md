@@ -10,7 +10,12 @@ pip install git+https://github.com/roboflow/sports.git
 cd examples/cricket
 ```
 
-No extra dependencies are needed.
+The model-free pipeline needs no extra dependencies. To use the pitch keypoint and
+ball models:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## 🧭 how it works
 
@@ -54,6 +59,23 @@ python pitch_map.py run \
 `--manual_fallback` lets you step through the frames (`a`/`d`) and click the bounce
 when it is not found automatically. `--display` shows the output while rendering.
 
+With models instead, calibration is automatic for every delivery, so clips from
+different camera positions can be mixed:
+
+```bash
+python pitch_map.py run \
+  --source_video_paths data/delivery_*.mp4 \
+  --pitch_model data/best.pt \
+  --ball_model cricket-balls-l1us5/3 \
+  --target_video_path data/pitch_map.mp4
+```
+
+`--pitch_model` is a model trained with the notebook below. It finds the keypoints in
+several frames of each delivery and combines them with a median, which recovers points
+hidden by the bowler or the umpire in some frames; a delivery is skipped if fewer than
+2 keypoints are found at either end. `--ball_model` is a model hosted on Roboflow,
+called with `ROBOFLOW_API_KEY` or the key saved by `roboflow login`.
+
 ## 🧪 synthetic clips
 
 `make_synthetic_clip.py` renders behind-the-bowler deliveries with known bounce
@@ -84,13 +106,14 @@ baseline. Public Roboflow Universe datasets can replace both.
   reprojection error of 0.3-0.6% of the pitch height on every source, which checks the
   mapping. Train a YOLOv8 pose model on it with
   [train_pitch_keypoint_detector.ipynb](notebooks/train_pitch_keypoint_detector.ipynb).
-  The model is not trained or connected to `pitch_map.py` yet.
+  Pass it to `pitch_map.py` with `--pitch_model`. It has not been evaluated on real
+  footage yet.
 - **Ball** - [cricket-balls](https://universe.roboflow.com/cricket-rfyd8/cricket-balls-l1us5)
   has 3,723 broadcast frames where the ball is about 12 px wide in a 1,280 px frame. Its
   hosted model found 46 of 74 balls (62%) on 100 test images, with 10 false detections
   (82% precision) and a median centre error of 1.1 px. The test images come from the
-  same broadcasts as the training images, so expect lower numbers on other footage. It
-  is not connected to `pitch_map.py` yet.
+  same broadcasts as the training images, so expect lower numbers on other footage. Use
+  it with `--ball_model cricket-balls-l1us5/3`.
 
 | dataset | author | license |
 |:--------|:-------|:--------|
@@ -116,8 +139,8 @@ stored in this repository.
 ## 🗺️ roadmap
 
 - [x] Dataset and training notebook for the pitch keypoint detector.
-- [ ] Train the pitch keypoint detector and use it instead of manual calibration.
-- [ ] Use the trained ball detector for real broadcast footage.
+- [x] Use a pitch keypoint model and a hosted ball model in `pitch_map.py`.
+- [ ] Train the pitch keypoint detector and evaluate the pipeline on real footage.
 - [ ] Beehive view: where the ball passed the stumps, using the vertical plane of
   the batter's stumps. It needs stump tops, which the datasets above do not have; the
   [stumps](https://universe.roboflow.com/sarahs-workspace-7m1bb/stumps-q76nc) and
