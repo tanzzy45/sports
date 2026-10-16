@@ -285,7 +285,50 @@ class MotionBallDetector:
         return candidates
 
 
-class RoboflowBallDetector:
+class FrameBallDetector:
+    """A ball detector that looks at one frame at a time."""
+
+    def detect(self, frame: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray,
+                      to_reference: List[Optional[np.ndarray]]) -> List[np.ndarray]:
+        """Candidates per frame, in reference frame pixels inside `mask`."""
+        candidates = []
+        for frame, homography in tqdm(list(zip(frames, to_reference)),
+                                      desc="ball detection", leave=False):
+            if homography is None:
+                candidates.append(np.empty((0, 2)))
+                continue
+            candidates.append(inside_mask(transform(homography, self.detect(frame)), mask))
+        return candidates
+
+
+class YoloBallDetector(FrameBallDetector):
+    """Ball detection with a local Ultralytics model, e.g. one trained with
+    notebooks/train_ball_detector.ipynb."""
+
+    def __init__(self, model_path: str, confidence: float = 0.3,
+                 imgsz: int = 1280) -> None:
+        from ultralytics import YOLO
+
+        self.model = YOLO(model_path)
+        self.confidence = confidence
+        self.imgsz = imgsz
+
+    def detect(self, frame: np.ndarray) -> np.ndarray:
+        result = self.model(frame, imgsz=self.imgsz, conf=self.confidence,
+                            verbose=False)[0]
+        names = result.names
+        return np.array([
+            [(x1 + x2) / 2, (y1 + y2) / 2]
+            for (x1, y1, x2, y2), cls in zip(result.boxes.xyxy.cpu().numpy(),
+                                             result.boxes.cls.cpu().numpy().astype(int))
+            if "ball" in names[cls].lower()
+        ]).reshape(-1, 2)
+
+
+class RoboflowBallDetector(FrameBallDetector):
     """
     Ball detection with a model hosted on Roboflow, e.g. `cricket-balls-l1us5/3`.
     Uses `ROBOFLOW_API_KEY`, or the key saved by `roboflow login`.
@@ -332,18 +375,6 @@ class RoboflowBallDetector:
             for prediction in data["predictions"]
             if "ball" in prediction["class"].lower()
         ]).reshape(-1, 2)
-
-    def detect_frames(self, frames: List[np.ndarray], mask: np.ndarray,
-                      to_reference: List[Optional[np.ndarray]]) -> List[np.ndarray]:
-        """Candidates per frame, in reference frame pixels inside `mask`."""
-        candidates = []
-        for frame, homography in tqdm(list(zip(frames, to_reference)),
-                                      desc="ball detection", leave=False):
-            if homography is None:
-                candidates.append(np.empty((0, 2)))
-                continue
-            candidates.append(inside_mask(transform(homography, self.detect(frame)), mask))
-        return candidates
 
 
 def link_trajectory(candidates: List[np.ndarray], max_jump: float,
@@ -564,8 +595,12 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         from ultralytics import YOLO
 
         pitch_model = YOLO(pitch_model_path)
-    ball_detector = (RoboflowBallDetector(ball_model_id, ball_confidence)
-                     if ball_model_id else MotionBallDetector())
+    if not ball_model_id:
+        ball_detector = MotionBallDetector()
+    elif ball_model_id.endswith(".pt"):
+        ball_detector = YoloBallDetector(ball_model_id, ball_confidence)
+    else:
+        ball_detector = RoboflowBallDetector(ball_model_id, ball_confidence)
 
     video_info = sv.VideoInfo.from_video_path(source_video_paths[0])
     width, height = video_info.width, video_info.height
@@ -663,8 +698,9 @@ if __name__ == '__main__':
                                    help='pitch keypoint model (best.pt) that calibrates '
                                         'every delivery automatically')
     run_parser.add_argument('--ball_model', type=str, default=None,
-                            help='Roboflow model id, e.g. cricket-balls-l1us5/3; '
-                                 'frame differencing is used when omitted')
+                            help='local model (.pt) or Roboflow model id, e.g. '
+                                 'cricket-balls-l1us5/3; frame differencing is used '
+                                 'when omitted')
     run_parser.add_argument('--ball_confidence', type=float, default=0.3)
     run_parser.add_argument('--target_video_path', type=str, required=True)
     run_parser.add_argument('--batter_hand', type=BatterHand, default=BatterHand.RIGHT)
