@@ -26,6 +26,7 @@ import numpy as np
 import supervision as sv
 from tqdm import tqdm
 
+from ball_tracking import ReleaseBallTracker
 from camera_motion import frame_to_reference, static_overlay_mask, transform
 from prepare_pitch_dataset import CONFIG_VERTICES
 from sports.common.view import ViewTransformer
@@ -497,7 +498,8 @@ def bounce_on_pitch(bounce: Bounce, calibration: Calibration,
 def process_delivery(source_video_path: str, calibration: Optional[Calibration],
                      pitch_model, ball_detector, manual_fallback: bool,
                      manual_bounce: bool = False,
-                     saved: Optional[dict] = None) -> Delivery:
+                     saved: Optional[dict] = None,
+                     tracker: Optional[ReleaseBallTracker] = None) -> Delivery:
     frames = read_frames(source_video_path)
     height, width = frames[0].shape[:2]
     to_reference = frame_to_reference(frames)
@@ -514,13 +516,28 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         trajectory = np.full((len(frames), 2), np.nan)
         bounce = select_bounce_manually(frames, to_reference, calibration, trajectory)
     else:
+        def on_pitch(candidate: np.ndarray) -> bool:
+            found = detect_bounce(candidate)
+            return found is not None and bounce_on_pitch(found, calibration)
+
         candidates = ball_detector.detect_frames(frames, mask, to_reference)
         trajectory = link_trajectory(candidates, max_jump=0.08 * width)
-        bounce = detect_bounce(trajectory)
-        if bounce is not None and not bounce_on_pitch(bounce, calibration):
-            # e.g. a track of the ball flying off the edge, after the batter
+        tracks = [trajectory]
+        if tracker is not None:
+            # Also follow the ball from the bowler's release, accepting weaker
+            # detections near its path.
+            fps = sv.VideoInfo.from_video_path(source_video_path).fps
+            tracks.append(tracker.track(frames, to_reference, calibration, fps,
+                                        accept=on_pitch))
+        # e.g. a track of the ball flying off the edge, after the batter, is dropped
+        valid = [track for track in tracks if on_pitch(track)]
+        bounce = None
+        if valid:
+            # The track with the most detections of the ball is the best supported.
+            trajectory = max(valid, key=lambda track: (~np.isnan(track).any(axis=1)).sum())
+            bounce = detect_bounce(trajectory)
+        elif detect_bounce(trajectory) is not None:
             print(f"discarding a bounce off the pitch in {source_video_path}")
-            bounce = None
         if bounce is None and manual_fallback:
             print(f"no bounce found in {source_video_path}, select it manually")
             bounce = select_bounce_manually(frames, to_reference, calibration,
@@ -602,7 +619,8 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         pitch_model_path: Optional[str], ball_model_id: Optional[str],
         ball_confidence: float, target_video_path: str, batter_hand: BatterHand,
         manual_fallback: bool, results_path: Optional[str], display: bool,
-        manual_bounce: bool = False, bounces_path: Optional[str] = None) -> None:
+        manual_bounce: bool = False, bounces_path: Optional[str] = None,
+        ball_tracking: str = "link") -> None:
     calibration = load_calibration(calibration_path) if calibration_path else None
     saved = {}
     if bounces_path:
@@ -619,6 +637,11 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         ball_detector = YoloBallDetector(ball_model_id, ball_confidence)
     else:
         ball_detector = RoboflowBallDetector(ball_model_id, ball_confidence)
+    tracker = None
+    if ball_tracking == "release":
+        if not (ball_model_id or "").endswith(".pt"):
+            raise SystemExit("--ball_tracking release needs a local --ball_model (.pt)")
+        tracker = ReleaseBallTracker(ball_model_id)
 
     video_info = sv.VideoInfo.from_video_path(source_video_paths[0])
     width, height = video_info.width, video_info.height
@@ -628,7 +651,7 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         try:
             deliveries.append(process_delivery(
                 path, calibration, pitch_model, ball_detector, manual_fallback,
-                manual_bounce, saved.get(os.path.basename(path))))
+                manual_bounce, saved.get(os.path.basename(path)), tracker))
             paths.append(path)
         except ValueError as error:
             print(f"skipping {path}: {error}")
@@ -722,6 +745,10 @@ if __name__ == '__main__':
     run_parser.add_argument('--ball_confidence', type=float, default=0.1,
                             help='low by default: linking detections into a trajectory '
                                  'filters out most false detections')
+    run_parser.add_argument('--ball_tracking', choices=["link", "release"], default="link",
+                            help='release: also follow the ball from the bowler\'s '
+                                 'release in small windows, accepting weaker detections, '
+                                 'and keep the track with the most detections')
     run_parser.add_argument('--target_video_path', type=str, required=True)
     run_parser.add_argument('--batter_hand', type=BatterHand, default=BatterHand.RIGHT)
     run_parser.add_argument('--manual_fallback', action='store_true',
@@ -755,6 +782,7 @@ if __name__ == '__main__':
             manual_fallback=args.manual_fallback,
             manual_bounce=args.manual_bounce,
             bounces_path=args.bounces_path,
+            ball_tracking=args.ball_tracking,
             results_path=args.results_path,
             display=args.display
         )
