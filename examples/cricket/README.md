@@ -127,6 +127,23 @@ recording played at double speed), it did not find a single bounce: it missed th
 ball in flight, and two tracks followed the ball off the edge instead, which
 `pitch_map.py` now discards. Pitch calibration worked on all of them.
 
+`--ball_tracking release` also follows the ball from the bowler's hand:
+`ball_tracking.py` finds release candidates with a pose model, then searches for the
+ball only in small windows from there, cropped and enlarged, so weaker detections
+can be accepted. The track with the most detections wins. `evaluate_bounces.py`
+scores the bounces against bounces selected by hand, on 9 deliveries from 4 new
+broadcasts and the 3 held-out deliveries above:
+
+| | linking only | with `--ball_tracking release` |
+|:--|:--|:--|
+| new broadcasts, within 1 m | 0/9 (1 wrong) | 2/9 (28 cm, 67 cm), 1 more at 1.45 m |
+| held-out deliveries, within 1 m | 3/3 | 3/3 |
+
+On the remaining new broadcasts the detector itself is the limit: it does not fire
+on the ball even in a window placed on its path, while white shoes and gloves score
+up to 0.7. Labelling frames of these broadcasts, with those as negatives, is the
+next step.
+
 ## 🧪 synthetic clips
 
 `make_synthetic_clip.py` renders behind-the-bowler deliveries with known bounce
@@ -177,7 +194,8 @@ not stored in this repository.
 - [x] Camera motion compensation for broadcast zooms.
 - [x] Ball detector trained on broadcast footage, evaluated on held-out deliveries.
 - [ ] A larger held-out test set, across more broadcasts.
-- [ ] Track the ball along its predicted path, accepting weaker detections near it.
+- [x] Track the ball from the bowler's release, accepting weaker detections near it.
+- [ ] Ball detector trained on more broadcasts, with shoes and gloves as negatives.
 - [ ] Beehive view: where the ball passed the stumps, using the vertical plane of
   the batter's stumps. It needs stump tops, which the datasets above do not have; the
   [stumps](https://universe.roboflow.com/sarahs-workspace-7m1bb/stumps-q76nc) and
