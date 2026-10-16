@@ -480,6 +480,20 @@ def select_bounce_manually(frames: List[np.ndarray],
     return Bounce(frame_index=frame_index, xy=points.mean(axis=0).astype(float))
 
 
+def bounce_on_pitch(bounce: Bounce, calibration: Calibration,
+                    max_offset: float = 250.0) -> bool:
+    """
+    Whether a bounce can belong to a delivery: between the bowler's popping crease and
+    the batter's stumps, and at most `max_offset` [cm] wide of the middle stump line.
+    """
+    xy = calibration.image_to_pitch.transform_points(
+        bounce.xy[np.newaxis].astype(np.float32))
+    distance = distance_from_stumps(CONFIG, xy, calibration.batting_end)[0]
+    offset = abs(xy[0, 1] - CONFIG.middle_stump_y)
+    longest = CONFIG.pitch_length - CONFIG.popping_crease_distance
+    return 0 <= distance <= longest and offset <= max_offset
+
+
 def process_delivery(source_video_path: str, calibration: Optional[Calibration],
                      pitch_model, ball_detector, manual_fallback: bool,
                      manual_bounce: bool = False,
@@ -503,6 +517,10 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         candidates = ball_detector.detect_frames(frames, mask, to_reference)
         trajectory = link_trajectory(candidates, max_jump=0.08 * width)
         bounce = detect_bounce(trajectory)
+        if bounce is not None and not bounce_on_pitch(bounce, calibration):
+            # e.g. a track of the ball flying off the edge, after the batter
+            print(f"discarding a bounce off the pitch in {source_video_path}")
+            bounce = None
         if bounce is None and manual_fallback:
             print(f"no bounce found in {source_video_path}, select it manually")
             bounce = select_bounce_manually(frames, to_reference, calibration,
