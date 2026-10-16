@@ -701,7 +701,9 @@ if __name__ == '__main__':
                             help='local model (.pt) or Roboflow model id, e.g. '
                                  'cricket-balls-l1us5/3; frame differencing is used '
                                  'when omitted')
-    run_parser.add_argument('--ball_confidence', type=float, default=0.3)
+    run_parser.add_argument('--ball_confidence', type=float, default=0.1,
+                            help='low by default: linking detections into a trajectory '
+                                 'filters out most false detections')
     run_parser.add_argument('--target_video_path', type=str, required=True)
     run_parser.add_argument('--batter_hand', type=BatterHand, default=BatterHand.RIGHT)
     run_parser.add_argument('--manual_fallback', action='store_true',
