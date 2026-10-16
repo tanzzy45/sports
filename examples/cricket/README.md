@@ -118,9 +118,14 @@ automatically:
 | SCG, spin | white | good, 6.5 m, outside off |
 | SCG, spin | white | full, 5.5 m, outside off |
 
-Each trajectory was checked frame by frame. Three deliveries is a small test. The
-detector did not find the ball on the Adelaide and New Zealand clips: a pink ball, low
-resolution, and a recording played at double speed.
+Each trajectory was checked frame by frame. Three deliveries is a small test.
+
+The detector does not generalize to broadcasts it was not trained on yet. On 12
+deliveries from other broadcasts (a compilation of Test catches from several
+broadcasters, an IPL match at 480p, a pink-ball Test at Adelaide and a screen
+recording played at double speed), it did not find a single bounce: it missed the
+ball in flight, and two tracks followed the ball off the edge instead, which
+`pitch_map.py` now discards. Pitch calibration worked on all of them.
 
 ## 🧪 synthetic clips
 
