@@ -39,8 +39,9 @@ def find_wide_shots(source_video_path: str, model, stride: int, imgsz: int,
     total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     shots, start, last_wide = [], None, None
     for index in tqdm(range(0, total, stride), desc="scanning"):
-        capture.set(cv2.CAP_PROP_POS_FRAMES, index)
-        ok, frame = capture.read()
+        # Reading on is much faster than seeking, which decodes from a keyframe.
+        ok = all(capture.grab() for _ in range(stride - 1)) if index else True
+        ok, frame = capture.read() if ok else (False, None)
         if not ok:
             break
         if wide_shot(model, frame, imgsz, min_confidence):
