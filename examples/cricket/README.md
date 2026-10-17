@@ -139,10 +139,26 @@ broadcasts and the 3 held-out deliveries above:
 | new broadcasts, within 1 m | 0/9 (1 wrong) | 2/9 (28 cm, 67 cm), 1 more at 1.45 m |
 | held-out deliveries, within 1 m | 3/3 | 3/3 |
 
-On the remaining new broadcasts the detector itself is the limit: it does not fire
-on the ball even in a window placed on its path, while white shoes and gloves score
-up to 0.7. Labelling frames of these broadcasts, with those as negatives, is the
-next step.
+On the remaining new broadcasts the detector itself was the limit: it did not fire
+on the ball even in a window placed on its path, while white shoes and gloves scored
+up to 0.7.
+
+A second round of labelling added 384 frames from 31 deliveries of 7 more broadcasts
+(an England-India T20, Tests at Rajkot and the WTC Final, a night T20 at Ahmedabad,
+an ODI at Rajkot, and the Adelaide and New Zealand footage), none of them used by the
+scorecard above. Frames without a visible ball were kept as negatives. On 11 held-out
+deliveries from 8 broadcasts, the retrained detector finds 75% of the balls with
+0.11 false detections per frame. The same scorecard:
+
+| | linking only | with `--ball_tracking release` |
+|:--|:--|:--|
+| new broadcasts, within 1 m | 2/9 (12 cm, 56 cm) | 3/9 (12 cm, 56 cm, 69 cm), 1 more at 1.46 m |
+| held-out deliveries, within 1 m | 3/3 | 3/3 |
+
+The new bounces are on the 480p IPL clip, found by the detector alone, and on the
+screen recording, now 12 cm from the hand-selected bounce instead of 28 cm. The
+compilation of Test catches is still the hardest footage: 4 of its 6 deliveries have
+no bounce found.
 
 ## 🧪 synthetic clips
 
@@ -193,9 +209,10 @@ not stored in this repository.
 - [x] Pitch keypoint detector, evaluated on four broadcasts.
 - [x] Camera motion compensation for broadcast zooms.
 - [x] Ball detector trained on broadcast footage, evaluated on held-out deliveries.
-- [ ] A larger held-out test set, across more broadcasts.
+- [x] A held-out test set across more broadcasts (11 deliveries, 8 broadcasts).
 - [x] Track the ball from the bowler's release, accepting weaker detections near it.
-- [ ] Ball detector trained on more broadcasts, with shoes and gloves as negatives.
+- [x] Ball detector trained on more broadcasts, with frames without a ball as negatives.
+- [ ] More labelled broadcasts, starting with those the scorecard still misses.
 - [ ] Beehive view: where the ball passed the stumps, using the vertical plane of
   the batter's stumps. It needs stump tops, which the datasets above do not have; the
   [stumps](https://universe.roboflow.com/sarahs-workspace-7m1bb/stumps-q76nc) and
