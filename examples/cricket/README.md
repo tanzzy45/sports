@@ -155,10 +155,29 @@ deliveries from 8 broadcasts, the retrained detector finds 75% of the balls with
 | new broadcasts, within 1 m | 2/9 (12 cm, 56 cm) | 3/9 (12 cm, 56 cm, 69 cm), 1 more at 1.46 m |
 | held-out deliveries, within 1 m | 3/3 | 3/3 |
 
-The new bounces are on the 480p IPL clip, found by the detector alone, and on the
-screen recording, now 12 cm from the hand-selected bounce instead of 28 cm. The
-compilation of Test catches is still the hardest footage: 4 of its 6 deliveries have
-no bounce found.
+Most of the deliveries still missed were not detection failures: around the
+hand-selected bounce, the detector found the ball with confidence 0.6-0.8. Two
+things broke the track instead:
+
+- **Repeated frames.** The compilation shows 35-48% of its frames two to four times,
+  and the screen recording 30%: re-encoded footage converted to a higher frame rate.
+  The ball stands still, then jumps, which looks like a bounce. `pitch_map.py` now
+  drops frames that repeat the previous one.
+- **Short tracks and the wrong track.** From a wide camera at 25 fps the whole
+  visible flight can span about 70 pixels, which was below the minimum movement for a
+  track; and the longest track can be the ball after the shot. Tracks now need less
+  movement, and the longest track with a bounce on the pitch is kept.
+
+With the same detector and the same scorecard:
+
+| | linking only | with `--ball_tracking release` |
+|:--|:--|:--|
+| new broadcasts, within 1 m | 7/9, 1 wrong | 8/9 |
+| held-out deliveries, within 1 m | 3/3 | 3/3 |
+
+The errors on the new broadcasts are 9-98 cm, median 34 cm. One delivery of the
+compilation still has no bounce found, and one is 98 cm off because the bounce is
+right above the umpire's white hat in the image.
 
 ## 🧪 synthetic clips
 

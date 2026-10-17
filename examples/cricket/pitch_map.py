@@ -19,7 +19,7 @@ import json
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -89,6 +89,24 @@ class Delivery:
 
 def read_frames(source_video_path: str) -> List[np.ndarray]:
     return list(sv.get_video_frames_generator(source_path=source_video_path))
+
+
+def drop_repeated_frames(frames: List[np.ndarray], min_changed: int = 5,
+                         threshold: int = 25) -> List[np.ndarray]:
+    """
+    Drop frames that repeat the previous one. Re-encoded footage, e.g. compilations
+    and screen recordings converted to a higher frame rate, shows a frame two to four
+    times: the ball then stands still and jumps, which looks like a bounce. A frame
+    is a repeat when fewer than `min_changed` pixels change by more than `threshold`;
+    with a still camera, a moving ball alone changes more than that.
+    """
+    kept, previous = [], None
+    for frame in frames:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if previous is None or np.count_nonzero(cv2.absdiff(gray, previous) > threshold) >= min_changed:
+            kept.append(frame)
+        previous = gray
+    return kept
 
 
 def calibrate(source_video_path: str, calibration_path: str, frame_index: int,
@@ -379,11 +397,19 @@ class RoboflowBallDetector(FrameBallDetector):
 
 
 def link_trajectory(candidates: List[np.ndarray], max_jump: float,
-                    max_missed: int = 2, min_length: int = 6) -> np.ndarray:
+                    max_missed: int = 2, min_length: int = 6,
+                    min_extent: Optional[float] = None,
+                    accept: Optional[Callable[[np.ndarray], bool]] = None) -> np.ndarray:
     """
     Link per-frame candidates into tracks with a constant-velocity prediction and
-    return the longest moving track as a `(T, 2)` array with `NaN` gaps.
+    return the longest moving track that `accept` accepts (any, if `accept` is None)
+    as a `(T, 2)` array with `NaN` gaps; if none is accepted, the longest moving
+    track. A track moves when its points span more than `min_extent`, half of
+    `max_jump` by default: from a wide camera at 25 fps, the whole visible flight can
+    span less than one `max_jump`. Clips often go on after the delivery, so the
+    longest track can be the ball after the shot, which is why `accept` exists.
     """
+    min_extent = max_jump / 2 if min_extent is None else min_extent
     tracks: List[Dict] = []
     for t, points in enumerate(candidates):
         unused = list(range(len(points)))
@@ -409,14 +435,17 @@ def link_trajectory(candidates: List[np.ndarray], max_jump: float,
         track for track in tracks
         if len(track["points"]) >= min_length
         and np.linalg.norm(np.ptp(np.array(list(track["points"].values())), axis=0))
-        > max_jump
+        > min_extent
     ]
-    if not moving:
-        return trajectory
-    best = max(moving, key=lambda track: len(track["points"]))
-    for t, point in best["points"].items():
-        trajectory[t] = point
-    return trajectory
+    longest_first = []
+    for track in sorted(moving, key=lambda track: -len(track["points"])):
+        linked = np.full((len(candidates), 2), np.nan)
+        for t, point in track["points"].items():
+            linked[t] = point
+        if accept is None or accept(linked):
+            return linked
+        longest_first.append(linked)
+    return longest_first[0] if longest_first else trajectory
 
 
 def select_bounce_manually(frames: List[np.ndarray],
@@ -500,7 +529,12 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
                      manual_bounce: bool = False,
                      saved: Optional[dict] = None,
                      tracker: Optional[ReleaseBallTracker] = None) -> Delivery:
-    frames = read_frames(source_video_path)
+    all_frames = read_frames(source_video_path)
+    frames = drop_repeated_frames(all_frames)
+    if len(frames) < len(all_frames):
+        print(f"{source_video_path}: dropped {len(all_frames) - len(frames)} repeated frames")
+    # frames per second of new content, for the time the ball takes
+    fps = sv.VideoInfo.from_video_path(source_video_path).fps * len(frames) / len(all_frames)
     height, width = frames[0].shape[:2]
     to_reference = frame_to_reference(frames)
     if calibration is None:
@@ -521,12 +555,11 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
             return found is not None and bounce_on_pitch(found, calibration)
 
         candidates = ball_detector.detect_frames(frames, mask, to_reference)
-        trajectory = link_trajectory(candidates, max_jump=0.08 * width)
+        trajectory = link_trajectory(candidates, max_jump=0.08 * width, accept=on_pitch)
         tracks = [trajectory]
         if tracker is not None:
             # Also follow the ball from the bowler's release, accepting weaker
             # detections near its path.
-            fps = sv.VideoInfo.from_video_path(source_video_path).fps
             tracks.append(tracker.track(frames, to_reference, calibration, fps,
                                         accept=on_pitch))
         # e.g. a track of the ball flying off the edge, after the batter, is dropped
