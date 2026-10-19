@@ -175,9 +175,32 @@ With the same detector and the same scorecard:
 | new broadcasts, within 1 m | 7/9, 1 wrong | 8/9 |
 | held-out deliveries, within 1 m | 3/3 | 3/3 |
 
-The errors on the new broadcasts are 9-98 cm, median 34 cm. One delivery of the
-compilation still has no bounce found, and one is 98 cm off because the bounce is
+The errors on the new broadcasts are 9-86 cm, median 39 cm. One delivery of the
+compilation still has no bounce found, and one is 86 cm off because the bounce is
 right above the umpire's white hat in the image.
+
+### A match chosen afterwards
+
+To test footage picked after all of the above, a ball-by-ball highlights video of
+India v South Africa at the 2017 Champions Trophy (a series and broadcast not used
+anywhere else, although the ground, The Oval, appears in two training broadcasts) was
+cut into 6 deliveries by `find_deliveries.py` and run automatically. Bounces were
+then selected by hand, before looking at the automatic ones:
+
+| delivery | result |
+|:--|:--|
+| 3 | 13 cm from the hand-selected bounce |
+| 4 | 6 cm |
+| 5 | 2 cm |
+| 1 | wrong: the track goes from the hand straight to the bat, and the ball's deflection off the bat was taken for the bounce |
+| 2 | not processed: the clip starts on a side-on camera, so the camera could not be followed |
+| 6 | not scored: the ball is hidden at the bounce |
+
+This video also showed a calibration problem: calibration combined keypoints from
+frames across the whole clip, including frames where the camera has zoomed in on the
+batter or follows the ball after the shot, where the pitch is barely in view. On two
+deliveries those frames shrank the calibrated pitch to a third of its size. Only
+frames zoomed in at most 1.5 times are used now.
 
 ## 🧪 synthetic clips
 
@@ -218,7 +241,10 @@ not stored in this repository.
 - When one end of the pitch is out of view, the pitch keypoint model can mistake one
   end for the other. Check that the crease lines drawn on the output sit on the
   painted creases.
-- Expects one delivery per clip, filmed from behind the bowler.
+- Expects one delivery per clip, filmed from behind the bowler, starting on the wide
+  shot. A clip that starts on another camera cannot be followed.
+- When the ball is not seen bouncing before the bat, its deflection off the bat can be
+  taken for the bounce.
 - Yorkers leave few frames after the bounce and may need `--manual_fallback`.
 - Length zones are a broadcast convention and vary by bowling speed. Pass your own
   `LengthZone` list to adapt them.

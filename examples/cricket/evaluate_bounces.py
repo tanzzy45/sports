@@ -26,8 +26,24 @@ def load_references(paths: List[str], exclude: List[str]) -> List[dict]:
             for result in json.load(f):
                 clip = os.path.normpath(result["clip"])
                 if result.get("bounce_pitch_xy") is not None and clip not in excluded:
-                    references.append(dict(clip=clip, xy=np.array(result["bounce_pitch_xy"])))
+                    image_xy = result.get("bounce_reference_xy")
+                    references.append(dict(
+                        clip=clip, xy=np.array(result["bounce_pitch_xy"]),
+                        image_xy=None if image_xy is None else np.array(image_xy)))
     return references
+
+
+def reference_on_pitch(reference: dict, calibration) -> np.ndarray:
+    """
+    The reference bounce on the pitch. A bounce selected by hand is stored in pixels of
+    the delivery's reference frame, so it is projected with the same calibration as the
+    automatic bounce: the comparison measures the ball tracking, whatever changes in
+    calibration since the bounce was selected.
+    """
+    if reference["image_xy"] is None:
+        return reference["xy"]
+    return calibration.image_to_pitch.transform_points(
+        reference["image_xy"][np.newaxis].astype(np.float32))[0]
 
 
 def save_debug(path: str, delivery, reference_xy: np.ndarray) -> None:
@@ -61,10 +77,12 @@ def main(references: List[str], exclude: List[str], pitch_model: str, ball_model
         if debug_dir is not None:
             os.makedirs(debug_dir, exist_ok=True)
             name = reference["clip"].replace(os.sep, "_").replace(".mp4", ".jpg")
-            save_debug(os.path.join(debug_dir, name), delivery, reference["xy"])
+            save_debug(os.path.join(debug_dir, name), delivery,
+                       reference_on_pitch(reference, delivery.calibration))
         error = None
         if delivery.bounce_pitch_xy is not None:
-            error = float(np.linalg.norm(delivery.bounce_pitch_xy - reference["xy"]))
+            error = float(np.linalg.norm(delivery.bounce_pitch_xy
+                                         - reference_on_pitch(reference, delivery.calibration)))
         rows.append((reference["clip"], error))
         print(f"{reference['clip']}: {'no bounce' if error is None else f'{error:.0f} cm'}",
               flush=True)

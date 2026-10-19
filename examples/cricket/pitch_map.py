@@ -185,14 +185,20 @@ def load_calibration(calibration_path: str) -> Calibration:
 def calibrate_with_model(frames: List[np.ndarray],
                          to_reference: List[Optional[np.ndarray]], model,
                          min_confidence: float = 0.5, samples: int = 8,
-                         imgsz: int = 1280) -> Calibration:
+                         imgsz: int = 1280, max_zoom: float = 1.5) -> Calibration:
     """
     Calibrate the reference frame of a delivery with the pitch keypoint model. The
     keypoints found in several frames are mapped into the reference frame and
     combined with a median, which also recovers points hidden by the bowler or the
-    umpire in some of the frames.
+    umpire in some of the frames. Only frames zoomed in by at most `max_zoom`
+    compared with the reference frame are used: once the camera has zoomed in on the
+    batter, or follows the ball after the shot, the pitch is barely in view and the
+    keypoints found there are often wrong.
     """
     followed = [t for t, h in enumerate(to_reference) if h is not None]
+    wide = [t for t in followed
+            if 1 / np.sqrt(abs(np.linalg.det(to_reference[t][:2, :2]))) <= max_zoom]
+    followed = wide if len(wide) >= 2 else followed
     picks = np.linspace(0, len(followed) - 1, min(samples, len(followed))).astype(int)
     indices = np.unique([followed[i] for i in picks])
     found = np.full((len(indices), len(CONFIG_VERTICES), 2), np.nan)
@@ -486,6 +492,10 @@ def select_bounce_manually(frames: List[np.ndarray],
         cv2.putText(canvas, f"frame {index + 1}/{len(frames)}   clicked: {clicked or '-'}",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2,
                     cv2.LINE_AA)
+        if to_reference[index] is None:
+            cv2.putText(canvas, "camera not followed in this frame: clicks are ignored",
+                        (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2,
+                        cv2.LINE_AA)
         cv2.imshow(window, canvas)
         key = cv2.waitKey(20) & 0xFF
         if key == ord("a"):
