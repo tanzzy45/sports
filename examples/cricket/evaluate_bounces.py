@@ -63,7 +63,7 @@ def save_debug(path: str, delivery, reference_xy: np.ndarray) -> None:
 
 def main(references: List[str], exclude: List[str], pitch_model: str, ball_model: str,
          tracking: str, ball_confidence: float, close: float,
-         debug_dir: Optional[str] = None) -> None:
+         debug_dir: Optional[str] = None, use_flight: bool = True) -> None:
     pitch = YOLO(pitch_model)
     detector = pm.YoloBallDetector(ball_model, ball_confidence)
     tracker = pm.ReleaseBallTracker(ball_model) if tracking == "release" else None
@@ -73,7 +73,8 @@ def main(references: List[str], exclude: List[str], pitch_model: str, ball_model
             print(f"skipping {reference['clip']}: file not found")
             continue
         delivery = pm.process_delivery(reference["clip"], None, pitch, detector,
-                                       manual_fallback=False, tracker=tracker)
+                                       manual_fallback=False, tracker=tracker,
+                                       use_flight=use_flight)
         if debug_dir is not None:
             os.makedirs(debug_dir, exist_ok=True)
             name = reference["clip"].replace(os.sep, "_").replace(".mp4", ".jpg")
@@ -112,6 +113,8 @@ if __name__ == '__main__':
                         help='largest error [cm] that counts as the same bounce')
     parser.add_argument('--debug_dir', type=str, default=None,
                         help='save each reference frame with the trajectory and bounces')
+    parser.add_argument('--no_flight', action='store_true',
+                        help='score the bounce at the change of direction only')
     args = parser.parse_args()
     main(args.references, args.exclude, args.pitch_model, args.ball_model, args.tracking,
-         args.ball_confidence, args.close, args.debug_dir)
+         args.ball_confidence, args.close, args.debug_dir, not args.no_flight)

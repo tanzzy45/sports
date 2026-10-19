@@ -30,6 +30,14 @@ pip install -r requirements.txt
 - **Bounce** - perspective makes the ball slow down smoothly on screen as it moves
   away, while the bounce makes it jump upward. `detect_bounce` finds that jump and
   intersects the trajectory on both sides of it for sub-frame accuracy.
+- **Flight** - a broadcast camera turns and zooms about a fixed point, so the pitch
+  calibration also gives the whole camera (`ball_flight.py`); drawing the 71.1 cm tall
+  stumps through it lands them on the real stumps. A physical flight is fitted to the
+  detections: a straight line seen from above, falling under gravity from about 2.1 m
+  above the bowler's popping crease, then bouncing and keeping its line. The bounce
+  comes from the flight, between frames, and the flight ends at the batter's popping
+  crease, so the ball's deflection off the bat is not taken for the bounce. When no
+  flight fits, the jump above is used. `--no_flight` turns this off.
 - **Pitch map** - a homography is only valid for points on the ground, and the bounce
   is the one moment the ball is guaranteed to be on the ground. Only the bounce is
   projected onto the pitch, then classified by length and line.
@@ -179,6 +187,12 @@ The errors on the new broadcasts are 9-86 cm, median 39 cm. One delivery of the
 compilation still has no bounce found, and one is 86 cm off because the bounce is
 right above the umpire's white hat in the image.
 
+The flight fit (see how it works) keeps the same bounces within 1 m and makes them
+more precise: on the new broadcasts the median error goes from 39 cm to 21 cm, and
+on the held-out Oval delivery, selected by hand, from 19 cm to 10 cm. Where no flight
+fits, two deliveries of the compilation and the screen recording, the result is
+unchanged.
+
 ### A match chosen afterwards
 
 To test footage picked after all of the above, a ball-by-ball highlights video of
@@ -187,20 +201,28 @@ anywhere else, although the ground, The Oval, appears in two training broadcasts
 cut into 6 deliveries by `find_deliveries.py` and run automatically. Bounces were
 then selected by hand, before looking at the automatic ones:
 
-| delivery | result |
-|:--|:--|
-| 3 | 13 cm from the hand-selected bounce |
-| 4 | 6 cm |
-| 5 | 2 cm |
-| 1 | wrong: the track goes from the hand straight to the bat, and the ball's deflection off the bat was taken for the bounce |
-| 2 | not processed: the clip starts on a side-on camera, so the camera could not be followed |
-| 6 | not scored: the ball is hidden at the bounce |
+| delivery | from the hand-selected bounce | without the flight fit |
+|:--|:--|:--|
+| 1 | 2 cm | 8.0 m: the ball's deflection off the bat taken for the bounce |
+| 2 | 9 cm | 6.4 m: the same |
+| 3 | 16 cm | 13 cm |
+| 4 | 9 cm | 6 cm |
+| 5 | 7 cm | 2 cm |
+| 6 | not scored: the ball is hidden at the bounce | |
 
-This video also showed a calibration problem: calibration combined keypoints from
-frames across the whole clip, including frames where the camera has zoomed in on the
-batter or follows the ball after the shot, where the pitch is barely in view. On two
-deliveries those frames shrank the calibrated pitch to a third of its size. Only
-frames zoomed in at most 1.5 times are used now.
+This video showed three problems, all fixed above:
+
+- **Calibration** combined keypoints from frames across the whole clip, including
+  frames where the camera has zoomed in on the batter or follows the ball after the
+  shot, where the pitch is barely in view. On two deliveries those frames shrank the
+  calibrated pitch to a third of its size. Only frames zoomed in at most 1.5 times are
+  used now.
+- **A cut to a replay:** delivery 2 ends on a longer side-on replay, and the camera was
+  followed over the longest stretch between cuts. It is now followed over the stretch
+  with the wide shot behind the bowler.
+- **Short deliveries:** on deliveries 1 and 2 the ball rises steeply after the bounce
+  and Kohli plays a shot; the sharpest change of direction was the bat, not the pitch.
+  The flight fit tells them apart.
 
 ## 🧪 synthetic clips
 
@@ -217,8 +239,10 @@ python pitch_map.py run \
 ```
 
 On the default 6 synthetic deliveries at 25 fps, every bounce is found, within 3 cm
-across the pitch and 23-39 cm along it, about a quarter of the distance the ball
-travels between frames. Higher frame rates reduce this error.
+across the pitch and 5-22 cm along it. Without the flight fit it is 23-39 cm along it,
+about a quarter of the distance the ball travels between frames. The synthetic clips
+draw the ball's height as a shift in the image rather than through a real camera, so
+they check the flight fit only roughly.
 
 ## 📚 datasets
 
@@ -241,10 +265,11 @@ not stored in this repository.
 - When one end of the pitch is out of view, the pitch keypoint model can mistake one
   end for the other. Check that the crease lines drawn on the output sit on the
   painted creases.
-- Expects one delivery per clip, filmed from behind the bowler, starting on the wide
-  shot. A clip that starts on another camera cannot be followed.
-- When the ball is not seen bouncing before the bat, its deflection off the bat can be
-  taken for the bounce.
+- Expects one delivery per clip, filmed from behind the bowler; it is followed from
+  the wide shot until the first cut.
+- The flight fit needs real time between frames. Sped-up clips, and screen recordings
+  with irregular timing, fall back to the change of direction, where the ball's
+  deflection off the bat can be taken for the bounce.
 - Yorkers leave few frames after the bounce and may need `--manual_fallback`.
 - Length zones are a broadcast convention and vary by bowling speed. Pass your own
   `LengthZone` list to adapt them.
@@ -257,7 +282,9 @@ not stored in this repository.
 - [x] A held-out test set across more broadcasts (11 deliveries, 8 broadcasts).
 - [x] Track the ball from the bowler's release, accepting weaker detections near it.
 - [x] Ball detector trained on more broadcasts, with frames without a ball as negatives.
+- [x] Fit a physical flight to the detections, with the camera from the calibration.
 - [ ] More labelled broadcasts, starting with those the scorecard still misses.
+- [ ] More test matches chosen afterwards, each kept as a regression test.
 - [ ] Beehive view: where the ball passed the stumps, using the vertical plane of
   the batter's stumps. It needs stump tops, which the datasets above do not have; the
   [stumps](https://universe.roboflow.com/sarahs-workspace-7m1bb/stumps-q76nc) and

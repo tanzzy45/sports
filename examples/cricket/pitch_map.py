@@ -26,6 +26,7 @@ import numpy as np
 import supervision as sv
 from tqdm import tqdm
 
+from ball_flight import Flight, camera_from_homography, fit_flight
 from ball_tracking import ReleaseBallTracker
 from camera_motion import frame_to_reference, static_overlay_mask, transform
 from find_deliveries import wide_shot
@@ -86,6 +87,7 @@ class Delivery:
     trajectory: np.ndarray
     bounce: Optional[Bounce]
     bounce_pitch_xy: Optional[np.ndarray]
+    flight: Optional[Flight] = None  # the physical flight fitted to the trajectory
 
 
 def read_frames(source_video_path: str) -> List[np.ndarray]:
@@ -110,11 +112,17 @@ def drop_repeated_frames(frames: List[np.ndarray], min_changed: int = 5,
     is a repeat when fewer than `min_changed` pixels change by more than `threshold`;
     with a still camera, a moving ball alone changes more than that.
     """
+    return [frames[i] for i in new_frame_indices(frames, min_changed, threshold)]
+
+
+def new_frame_indices(frames: List[np.ndarray], min_changed: int = 5,
+                      threshold: int = 25) -> List[int]:
+    """Indices of the frames `drop_repeated_frames` keeps: when each new frame appears."""
     kept, previous = [], None
-    for frame in frames:
+    for index, frame in enumerate(frames):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if previous is None or np.count_nonzero(cv2.absdiff(gray, previous) > threshold) >= min_changed:
-            kept.append(frame)
+            kept.append(index)
         previous = gray
     return kept
 
@@ -548,13 +556,17 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
                      pitch_model, ball_detector, manual_fallback: bool,
                      manual_bounce: bool = False,
                      saved: Optional[dict] = None,
-                     tracker: Optional[ReleaseBallTracker] = None) -> Delivery:
+                     tracker: Optional[ReleaseBallTracker] = None,
+                     use_flight: bool = True) -> Delivery:
     all_frames = read_frames(source_video_path)
-    frames = drop_repeated_frames(all_frames)
+    kept = new_frame_indices(all_frames)
+    frames = [all_frames[i] for i in kept]
     if len(frames) < len(all_frames):
         print(f"{source_video_path}: dropped {len(all_frames) - len(frames)} repeated frames")
-    # frames per second of new content, for the time the ball takes
-    fps = sv.VideoInfo.from_video_path(source_video_path).fps * len(frames) / len(all_frames)
+    video_fps = sv.VideoInfo.from_video_path(source_video_path).fps
+    # when each kept frame is shown [s], and frames per second of new content
+    times = np.array(kept, dtype=float) / video_fps
+    fps = video_fps * len(frames) / len(all_frames)
     height, width = frames[0].shape[:2]
     # Follow the camera over the stretch with the wide shot behind the bowler, not over
     # a longer stretch after a cut, e.g. a replay from another camera.
@@ -564,6 +576,7 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         calibration = calibrate_with_model(frames, to_reference, pitch_model)
     mask = pitch_region_mask((height, width), calibration)
 
+    flight = None
     if saved is not None and saved.get("bounce_reference_xy") is not None:
         # Reuse a bounce from an earlier run, e.g. one selected by hand.
         trajectory = np.full((len(frames), 2), np.nan)
@@ -594,6 +607,17 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
             bounce = detect_bounce(trajectory)
         elif detect_bounce(trajectory) is not None:
             print(f"discarding a bounce off the pitch in {source_video_path}")
+        if use_flight:
+            # A physical flight tells a bounce from a deflection off the bat, and places
+            # a bounce between two detections; without one, keep the change of direction.
+            camera = camera_from_homography(calibration.pitch_to_image.m, (width, height))
+            flight = fit_flight(trajectory, times, camera, calibration.batting_end,
+                                calibration.image_to_pitch.m)
+            if flight is not None:
+                bounce = Bounce(
+                    frame_index=float(np.interp(flight.bounce_time, times, np.arange(len(times)))),
+                    xy=calibration.pitch_to_image.transform_points(
+                        flight.bounce[np.newaxis].astype(np.float32))[0].astype(float))
         if bounce is None and manual_fallback:
             print(f"no bounce found in {source_video_path}, select it manually")
             bounce = select_bounce_manually(frames, to_reference, calibration,
@@ -604,7 +628,7 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
         bounce_pitch_xy = calibration.image_to_pitch.transform_points(
             bounce.xy[np.newaxis].astype(np.float32))[0]
     return Delivery(frames, to_reference, calibration, trajectory, bounce,
-                    bounce_pitch_xy)
+                    bounce_pitch_xy, flight)
 
 
 def draw_trail(frame: np.ndarray, trajectory: np.ndarray) -> np.ndarray:
@@ -676,7 +700,7 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         ball_confidence: float, target_video_path: str, batter_hand: BatterHand,
         manual_fallback: bool, results_path: Optional[str], display: bool,
         manual_bounce: bool = False, bounces_path: Optional[str] = None,
-        ball_tracking: str = "link") -> None:
+        ball_tracking: str = "link", use_flight: bool = True) -> None:
     calibration = load_calibration(calibration_path) if calibration_path else None
     saved = {}
     if bounces_path:
@@ -707,7 +731,7 @@ def run(source_video_paths: List[str], calibration_path: Optional[str],
         try:
             deliveries.append(process_delivery(
                 path, calibration, pitch_model, ball_detector, manual_fallback,
-                manual_bounce, saved.get(os.path.basename(path)), tracker))
+                manual_bounce, saved.get(os.path.basename(path)), tracker, use_flight))
             paths.append(path)
         except ValueError as error:
             print(f"skipping {path}: {error}")
@@ -801,6 +825,9 @@ if __name__ == '__main__':
     run_parser.add_argument('--ball_confidence', type=float, default=0.1,
                             help='low by default: linking detections into a trajectory '
                                  'filters out most false detections')
+    run_parser.add_argument('--no_flight', action='store_true',
+                            help='place the bounce at the change of direction only, '
+                                 'without fitting a physical flight')
     run_parser.add_argument('--ball_tracking', choices=["link", "release"], default="link",
                             help='release: also follow the ball from the bowler\'s '
                                  'release in small windows, accepting weaker detections, '
@@ -839,6 +866,7 @@ if __name__ == '__main__':
             manual_bounce=args.manual_bounce,
             bounces_path=args.bounces_path,
             ball_tracking=args.ball_tracking,
+            use_flight=not args.no_flight,
             results_path=args.results_path,
             display=args.display
         )
