@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from ball_tracking import ReleaseBallTracker
 from camera_motion import frame_to_reference, static_overlay_mask, transform
+from find_deliveries import wide_shot
 from prepare_pitch_dataset import CONFIG_VERTICES
 from sports.common.view import ViewTransformer
 from sports.cricket import (
@@ -89,6 +90,15 @@ class Delivery:
 
 def read_frames(source_video_path: str) -> List[np.ndarray]:
     return list(sv.get_video_frames_generator(source_path=source_video_path))
+
+
+def first_wide_shot(frames: List[np.ndarray], model, step: int = 5, imgsz: int = 640,
+                    min_confidence: float = 0.5) -> Optional[int]:
+    """First frame, checking every `step`-th one, that shows both ends of the pitch."""
+    for t in range(0, len(frames), step):
+        if wide_shot(model, frames[t], imgsz, min_confidence):
+            return t
+    return None
 
 
 def drop_repeated_frames(frames: List[np.ndarray], min_changed: int = 5,
@@ -546,7 +556,10 @@ def process_delivery(source_video_path: str, calibration: Optional[Calibration],
     # frames per second of new content, for the time the ball takes
     fps = sv.VideoInfo.from_video_path(source_video_path).fps * len(frames) / len(all_frames)
     height, width = frames[0].shape[:2]
-    to_reference = frame_to_reference(frames)
+    # Follow the camera over the stretch with the wide shot behind the bowler, not over
+    # a longer stretch after a cut, e.g. a replay from another camera.
+    anchor = first_wide_shot(frames, pitch_model) if calibration is None else None
+    to_reference = frame_to_reference(frames, anchor=anchor)
     if calibration is None:
         calibration = calibrate_with_model(frames, to_reference, pitch_model)
     mask = pitch_region_mask((height, width), calibration)
